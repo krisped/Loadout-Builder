@@ -3,7 +3,7 @@ package com.krisped;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.ui.PluginPanel;
-import net.runelite.client.util.AsyncBufferedImage;
+import lombok.extern.slf4j.Slf4j;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
@@ -13,54 +13,60 @@ import java.awt.datatransfer.Clipboard;
 import java.awt.datatransfer.StringSelection;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
-import java.lang.reflect.Method;
-import java.util.ArrayList;
-import java.util.EnumMap;
-import java.util.LinkedHashMap;
+import java.util.*;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Optional;
-import java.util.HashMap;
+import java.util.Objects;
+import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.Set;
 
+@Slf4j
 public class LoadoutBuilderPanel extends PluginPanel
 {
     public enum EquipmentSlot
     {
-        HEAD,
-        CAPE,
-        NECK,
-        AMMO,
-        WEAPON,
-        BODY,
-        SHIELD,
-        LEGS,
-        HANDS,
-        BOOTS,
-        RING
+        HEAD, CAPE, NECK, AMMO, WEAPON, BODY, SHIELD, LEGS, HANDS, BOOTS, RING
     }
 
     private static final int INV_TILE_SIZE = 34;
     private static final int EQUIP_TILE_SIZE = 42;
     private static final int GAP = 8;
+    private static final int INVENTORY_SIZE = 28;
     private static final Color TILE_BG = new Color(53, 49, 44);
     private static final Color TILE_BORDER = new Color(88, 80, 72);
     private static final Color CAPTION_FG = new Color(180, 180, 180);
     private static final Font CAPTION_FONT = new Font("Dialog", Font.PLAIN, 10);
-    private static final int MAX_ITEM_ID = 35000;
+
+    // ABSOLUTELY CRITICAL: Known stackable items
+    private static final Set<Integer> FORCED_STACKABLES;
+
+    static {
+        Set<Integer> stackables = new HashSet<>();
+        stackables.add(995);   // Coins - MUST BE HERE!
+        stackables.add(6529);  // Tokkul
+        stackables.add(554);   // Fire rune
+        stackables.add(555);   // Water rune
+        stackables.add(556);   // Air rune
+        stackables.add(557);   // Earth rune
+        FORCED_STACKABLES = Collections.unmodifiableSet(stackables);
+        log.info("LoadoutBuilderPanel forced stackables: {}", stackables);
+    }
 
     private final ItemManager itemManager;
     private final ClientThread clientThread;
+    private final ItemResolver itemResolver;
+    private final IconUtil iconUtil;
 
     private final Map<EquipmentSlot, JButton> equipmentButtons = new EnumMap<>(EquipmentSlot.class);
     private final Map<EquipmentSlot, Integer> equipped = new EnumMap<>(EquipmentSlot.class);
+    private final Map<EquipmentSlot, Integer> equippedQty = new EnumMap<>(EquipmentSlot.class);
     private final Map<EquipmentSlot, String> equipmentLastQuery = new EnumMap<>(EquipmentSlot.class);
 
-    private final JButton[] inventoryButtons = new JButton[28];
-    private final Integer[] inventoryIds = new Integer[28];
-    private final String[] inventoryLastQuery = new String[28];
+    private final JButton[] inventoryButtons = new JButton[INVENTORY_SIZE];
+    private final Integer[] inventoryIds = new Integer[INVENTORY_SIZE];
+    private final int[] inventoryQtys = new int[INVENTORY_SIZE];
+    private final String[] inventoryLastQuery = new String[INVENTORY_SIZE];
 
     // Drag state
     private int pressIndex = -1;
@@ -72,14 +78,12 @@ public class LoadoutBuilderPanel extends PluginPanel
     private final JButton copyButton = new JButton("Copy");
     private final JButton importButton = new JButton("Import");
 
-    // Navneoppslag-cache (bygges én gang på client thread)
-    private final Map<String, Integer> nameToIdCache = new HashMap<>();
-    private boolean nameIndexBuilt = false;
-
     public LoadoutBuilderPanel(ItemManager itemManager, ClientThread clientThread)
     {
         this.itemManager = itemManager;
         this.clientThread = clientThread;
+        this.itemResolver = new ItemResolver(itemManager, clientThread);
+        this.iconUtil = new IconUtil(itemManager, clientThread);
 
         setLayout(new BorderLayout());
         setOpaque(false);
@@ -106,7 +110,11 @@ public class LoadoutBuilderPanel extends PluginPanel
         content.add(loadoutTextPanel);
 
         add(content, BorderLayout.CENTER);
+
+        log.info("LoadoutBuilderPanel initialized with forced stackables: {}", FORCED_STACKABLES);
     }
+
+    // [All the UI building methods remain the same - buildEquipmentGrid, etc.]
 
     private JPanel buildEquipmentGrid()
     {
@@ -181,11 +189,12 @@ public class LoadoutBuilderPanel extends PluginPanel
         JPanel grid = new JPanel(new GridLayout(7, 4, GAP, GAP));
         grid.setOpaque(false);
 
-        for (int i = 0; i < 28; i++)
+        for (int i = 0; i < INVENTORY_SIZE; i++)
         {
             final int index = i;
             JButton btn = createTileButton(false);
             btn.setToolTipText("Inventory slot " + (i + 1));
+            inventoryQtys[i] = 0;
 
             MouseAdapter adapter = new MouseAdapter()
             {
@@ -259,22 +268,18 @@ public class LoadoutBuilderPanel extends PluginPanel
         loadoutArea.setLineWrap(true);
         loadoutArea.setWrapStyleWord(true);
 
-        // Top: to rader (Repcal) + (Copy/Import)
         JPanel header = new JPanel();
         header.setOpaque(false);
         header.setLayout(new BoxLayout(header, BoxLayout.Y_AXIS));
 
         JPanel row1 = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
         row1.setOpaque(false);
-        repcalButton.setToolTipText("Generer tekst fra nåværende utstyr og inventory");
         repcalButton.addActionListener(e -> generateLoadoutText());
         row1.add(repcalButton);
 
         JPanel row2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
         row2.setOpaque(false);
-        copyButton.setToolTipText("Kopier teksten i feltet til utklippstavlen");
         copyButton.addActionListener(e -> copyLoadoutToClipboard());
-        importButton.setToolTipText("Importer fra teksten i feltet til slots og inventory");
         importButton.addActionListener(e -> importFromText(loadoutArea.getText()));
         row2.add(copyButton);
         row2.add(importButton);
@@ -316,17 +321,34 @@ public class LoadoutBuilderPanel extends PluginPanel
         return p;
     }
 
-    // Equipment
-
+    // Equipment methods (unchanged)
     private void showEquipmentPopup(JButton btn, EquipmentSlot slot, int x, int y)
     {
         JPopupMenu menu = new JPopupMenu();
+
         JMenuItem change = new JMenuItem("Change item...");
         change.addActionListener(a -> onPickItemForSlot(slot, btn, equipmentLastQuery.get(slot)));
+        menu.add(change);
+
+        JMenuItem setAmount = new JMenuItem("Set amount...");
+        setAmount.addActionListener(a ->
+        {
+            Integer amt = promptAmount("Amount for this equipment item:", Math.max(1, equippedQty.getOrDefault(slot, 1)));
+            if (amt == null) return;
+            int q = Math.max(1, amt);
+            equippedQty.put(slot, q);
+            Integer id = equipped.get(slot);
+            if (id != null)
+            {
+                setEquipmentIcon(slot, id, q);
+            }
+        });
+        menu.add(setAmount);
+
         JMenuItem clear = new JMenuItem("Remove item");
         clear.addActionListener(a -> clearSlot(slot));
-        menu.add(change);
         menu.add(clear);
+
         menu.show(btn, x, y);
     }
 
@@ -340,13 +362,14 @@ public class LoadoutBuilderPanel extends PluginPanel
         res.ifPresent(result ->
         {
             equipmentLastQuery.put(slot, result.getQuery());
-            setEquipmentItem(slot, result.getItem().getId(), result.getItem().getName());
+            setEquipmentItem(slot, result.getItem().getId(), result.getItem().getName(), 1);
         });
     }
 
     private void clearSlot(EquipmentSlot slot)
     {
         equipped.remove(slot);
+        equippedQty.remove(slot);
         JButton btn = equipmentButtons.get(slot);
         if (btn != null)
         {
@@ -357,29 +380,32 @@ public class LoadoutBuilderPanel extends PluginPanel
         }
     }
 
-    private void clearAllEquipment()
+    private void setEquipmentItem(EquipmentSlot slot, int itemId, String itemName, int quantity)
     {
-        for (EquipmentSlot s : EquipmentSlot.values())
-        {
-            clearSlot(s);
-        }
-    }
+        equipped.put(slot, itemId);
+        equippedQty.put(slot, Math.max(1, quantity));
+        setEquipmentIcon(slot, itemId, Math.max(1, quantity));
 
-    private void setEquipmentItem(EquipmentSlot slot, int itemId, String itemName)
-    {
         JButton btn = equipmentButtons.get(slot);
         if (btn != null)
         {
-            // Sett ikon asynkront – unngå "hover før vises"
-            setButtonIconAsync(btn, itemId);
-            btn.setToolTipText(itemName + " (ID: " + itemId + ")");
-            revalidate();
-            repaint();
+            if (quantity > 1)
+                btn.setToolTipText(itemName + " (ID: " + itemId + ", x" + quantity + ")");
+            else
+                btn.setToolTipText(itemName + " (ID: " + itemId + ")");
         }
-        equipped.put(slot, itemId);
     }
 
-    // Inventory
+    private void setEquipmentIcon(EquipmentSlot slot, int itemId, int quantity)
+    {
+        JButton btn = equipmentButtons.get(slot);
+        if (btn == null) return;
+        iconUtil.setButtonIcon(btn, itemId, quantity);
+        revalidate();
+        repaint();
+    }
+
+    // FIXED INVENTORY METHODS with extensive debugging
 
     private void showInventoryPopup(JButton btn, int index, int x, int y)
     {
@@ -400,23 +426,14 @@ public class LoadoutBuilderPanel extends PluginPanel
             change.addActionListener(a -> onPickInventoryItem(index, btn, inventoryLastQuery[index]));
             menu.add(change);
 
-            JMenuItem plus1 = new JMenuItem("Add +1");
-            JMenuItem plus5 = new JMenuItem("Add +5");
-            JMenuItem plus10 = new JMenuItem("Add +10");
-            plus1.addActionListener(a -> fillNextFreeSlots(itemId, 1, index + 1));
-            plus5.addActionListener(a -> fillNextFreeSlots(itemId, 5, index + 1));
-            plus10.addActionListener(a -> fillNextFreeSlots(itemId, 10, index + 1));
-            menu.add(plus1);
-            menu.add(plus5);
-            menu.add(plus10);
-
-            JMenuItem setAmount = new JMenuItem("Set amount...");
+            JMenuItem setAmount = new JMenuItem("Set amount (total)...");
             setAmount.addActionListener(a ->
             {
-                Integer amt = promptAmount("Total amount of this item in inventory:", countItemInInventory(itemId));
+                Integer amt = promptAmount("Total amount of this item in inventory:", totalAmountOfItem(itemId));
                 if (amt != null)
                 {
-                    ensureItemCount(itemId, amt, index);
+                    log.info("User requested {} of item {} (current total: {})", amt, itemId, totalAmountOfItem(itemId));
+                    ensureItemCountAsync(itemId, amt, index);
                 }
             });
             menu.add(setAmount);
@@ -445,24 +462,230 @@ public class LoadoutBuilderPanel extends PluginPanel
         {
             inventoryLastQuery[index] = result.getQuery();
             int itemId = result.getItem().getId();
+            log.info("User picked item {} for slot {}", itemId, index);
 
-            Integer amt = promptAmount("How many to have in inventory (total)?", Math.max(1, countItemInInventory(itemId)));
+            Integer amt = promptAmount("How many to have in inventory (total)?", Math.max(1, totalAmountOfItem(itemId)));
             if (amt == null) return;
 
-            setInventorySlot(index, itemId);
-            ensureItemCount(itemId, amt, index);
+            log.info("User wants {} of item {} in inventory", amt, itemId);
+            ensureItemCountAsync(itemId, amt, index);
         });
     }
 
-    private void setInventorySlot(int index, int itemId)
+    private Integer promptAmount(String message, int defaultValue)
+    {
+        while (true)
+        {
+            String input = JOptionPane.showInputDialog(this, message, defaultValue);
+            if (input == null) return null;
+
+            try
+            {
+                int value = Integer.parseInt(input.trim());
+                if (value < 0)
+                {
+                    JOptionPane.showMessageDialog(this, "Amount must be positive", "Invalid Input", JOptionPane.ERROR_MESSAGE);
+                    continue;
+                }
+                return value;
+            }
+            catch (NumberFormatException e)
+            {
+                JOptionPane.showMessageDialog(this, "Please enter a valid number", "Invalid Input", JOptionPane.ERROR_MESSAGE);
+            }
+        }
+    }
+
+    // COMPLETELY REWRITTEN with extensive debugging
+    private void ensureItemCountAsync(int itemId, int desired, int preferStartIndex)
+    {
+        log.info("=== ENSURE ITEM COUNT START ===");
+        log.info("Input: itemId={}, desired={}, preferIndex={}", itemId, desired, preferStartIndex);
+
+        clientThread.invoke(() ->
+        {
+            int canonId;
+            try {
+                canonId = itemManager.canonicalize(itemId);
+                log.info("Canonicalized {} -> {}", itemId, canonId);
+            } catch (Exception e) {
+                canonId = itemId;
+                log.warn("Failed to canonicalize {}, using original", itemId, e);
+            }
+
+            // CRITICAL: Check stackable status
+            final boolean isStack = isItemStackable(canonId);
+            final int desiredFinal = Math.max(0, desired);
+            final int finalId = canonId;
+
+            log.info("Item {} (canon: {}) - STACKABLE: {}, desired: {}", itemId, canonId, isStack, desiredFinal);
+
+            SwingUtilities.invokeLater(() ->
+            {
+                log.info("Processing item {} on EDT - stackable: {}", finalId, isStack);
+
+                if (isStack)
+                {
+                    log.info("Calling handleStackableItem for item {}", finalId);
+                    handleStackableItem(finalId, desiredFinal, preferStartIndex);
+                }
+                else
+                {
+                    log.info("Calling handleNonStackableItem for item {}", finalId);
+                    handleNonStackableItem(finalId, desiredFinal, preferStartIndex);
+                }
+
+                log.info("=== ENSURE ITEM COUNT END ===");
+            });
+        });
+    }
+
+    // ENHANCED stackable detection with LOTS of debugging
+    private boolean isItemStackable(int canonId)
+    {
+        log.info("Checking if item {} is stackable...", canonId);
+
+        // FIRST: Check our forced list
+        if (FORCED_STACKABLES.contains(canonId)) {
+            log.info("Item {} found in FORCED_STACKABLES - returning TRUE", canonId);
+            return true;
+        }
+
+        // SECOND: Use ItemResolver
+        boolean resolverResult = itemResolver.isStackableOnClientThread(canonId);
+        log.info("ItemResolver says item {} stackable: {}", canonId, resolverResult);
+
+        return resolverResult;
+    }
+
+    private void handleStackableItem(int itemId, int desired, int preferStartIndex)
+    {
+        log.info("=== HANDLING STACKABLE ITEM ===");
+        log.info("Item: {}, desired: {}, prefer: {}", itemId, desired, preferStartIndex);
+
+        if (desired == 0)
+        {
+            log.info("Desired amount is 0, removing all of item {}", itemId);
+            removeAllOfItem(itemId);
+            return;
+        }
+
+        // Find where this item currently exists
+        int targetSlot = -1;
+
+        if (preferStartIndex >= 0 && preferStartIndex < INVENTORY_SIZE &&
+                Objects.equals(inventoryIds[preferStartIndex], itemId))
+        {
+            targetSlot = preferStartIndex;
+            log.info("Item {} found in preferred slot {}", itemId, preferStartIndex);
+        }
+        else
+        {
+            for (int i = 0; i < INVENTORY_SIZE; i++)
+            {
+                if (Objects.equals(inventoryIds[i], itemId))
+                {
+                    targetSlot = i;
+                    log.info("Item {} found in slot {}", itemId, i);
+                    break;
+                }
+            }
+        }
+
+        if (targetSlot == -1)
+        {
+            log.info("Item {} not found anywhere, placing new stack of {}", itemId, desired);
+            placeStackInNextFreeSlot(itemId, desired);
+        }
+        else
+        {
+            log.info("Updating existing slot {} with {} of item {}", targetSlot, desired, itemId);
+            setInventorySlot(targetSlot, itemId, desired);
+
+            // Remove all OTHER instances of this stackable item
+            int removed = 0;
+            for (int i = 0; i < INVENTORY_SIZE; i++)
+            {
+                if (i != targetSlot && Objects.equals(inventoryIds[i], itemId))
+                {
+                    log.info("Removing duplicate stackable item {} from slot {}", itemId, i);
+                    clearInventorySlot(i);
+                    removed++;
+                }
+            }
+            log.info("Removed {} duplicate stacks of item {}", removed, itemId);
+        }
+
+        log.info("=== STACKABLE HANDLING COMPLETE ===");
+    }
+
+    private void handleNonStackableItem(int itemId, int desired, int preferStartIndex)
+    {
+        log.info("=== HANDLING NON-STACKABLE ITEM ===");
+        log.info("Item: {}, desired: {}, prefer: {}", itemId, desired, preferStartIndex);
+
+        List<Integer> indices = findItemIndices(itemId);
+        int current = indices.size();
+        log.info("Item {} currently in {} slots: {}", itemId, current, indices);
+
+        // Ensure preferred slot has the item if desired > 0
+        if (desired > 0 && preferStartIndex >= 0 && preferStartIndex < INVENTORY_SIZE)
+        {
+            if (inventoryIds[preferStartIndex] == null || !Objects.equals(inventoryIds[preferStartIndex], itemId))
+            {
+                if (inventoryIds[preferStartIndex] == null)
+                {
+                    log.info("Placing item {} in preferred empty slot {}", itemId, preferStartIndex);
+                    setInventorySlot(preferStartIndex, itemId, 1);
+                    current++;
+                    indices.add(preferStartIndex);
+                }
+            }
+        }
+
+        if (current > desired)
+        {
+            int toRemove = current - desired;
+            log.info("Need to remove {} instances of item {}", toRemove, itemId);
+
+            for (int i = indices.size() - 1; i >= 0 && toRemove > 0; i--)
+            {
+                int idx = indices.get(i);
+                if (idx == preferStartIndex) continue;
+                if (Objects.equals(inventoryIds[idx], itemId))
+                {
+                    log.info("Removing item {} from slot {}", itemId, idx);
+                    clearInventorySlot(idx);
+                    toRemove--;
+                }
+            }
+        }
+        else if (current < desired)
+        {
+            int shortage = desired - current;
+            log.info("Need to add {} more instances of item {}", shortage, itemId);
+            int start = (preferStartIndex >= 0 && preferStartIndex < INVENTORY_SIZE) ? (preferStartIndex + 1) : 0;
+            fillNextFreeSlots(itemId, shortage, start);
+        }
+
+        log.info("=== NON-STACKABLE HANDLING COMPLETE ===");
+    }
+
+    private void setInventorySlot(int index, int itemId, int quantity)
     {
         inventoryIds[index] = itemId;
+        inventoryQtys[index] = Math.max(1, quantity);
         updateInventoryButtonIcon(index);
+        log.info("Set slot {}: item {} x{}", index, itemId, quantity);
     }
 
     private void clearInventorySlot(int index)
     {
+        Integer oldId = inventoryIds[index];
+        int oldQty = inventoryQtys[index];
+
         inventoryIds[index] = null;
+        inventoryQtys[index] = 0;
         JButton btn = inventoryButtons[index];
         if (btn != null)
         {
@@ -472,11 +695,20 @@ public class LoadoutBuilderPanel extends PluginPanel
             revalidate();
             repaint();
         }
+        log.info("Cleared slot {}: was item {} x{}", index, oldId, oldQty);
+    }
+
+    private void clearAllEquipment()
+    {
+        for (EquipmentSlot s : EquipmentSlot.values())
+        {
+            clearSlot(s);
+        }
     }
 
     private void clearInventoryAll()
     {
-        for (int i = 0; i < 28; i++)
+        for (int i = 0; i < INVENTORY_SIZE; i++)
         {
             clearInventorySlot(i);
         }
@@ -484,21 +716,27 @@ public class LoadoutBuilderPanel extends PluginPanel
 
     private void swapInventorySlots(int a, int b)
     {
-        Integer tmp = inventoryIds[a];
+        Integer tmpId = inventoryIds[a];
+        int tmpQty = inventoryQtys[a];
         inventoryIds[a] = inventoryIds[b];
-        inventoryIds[b] = tmp;
+        inventoryQtys[a] = inventoryQtys[b];
+        inventoryIds[b] = tmpId;
+        inventoryQtys[b] = tmpQty;
         updateInventoryButtonIcon(a);
         updateInventoryButtonIcon(b);
+        log.info("Swapped slots {} and {}", a, b);
     }
 
     private void fillNextFreeSlots(int itemId, int count, int startIndex)
     {
         int remaining = count;
-        for (int i = startIndex; i < 28 && remaining > 0; i++)
+        log.info("Filling {} slots with item {}, starting from {}", count, itemId, startIndex);
+
+        for (int i = startIndex; i < INVENTORY_SIZE && remaining > 0; i++)
         {
             if (inventoryIds[i] == null)
             {
-                setInventorySlot(i, itemId);
+                setInventorySlot(i, itemId, 1);
                 remaining--;
             }
         }
@@ -506,32 +744,53 @@ public class LoadoutBuilderPanel extends PluginPanel
         {
             if (inventoryIds[i] == null)
             {
-                setInventorySlot(i, itemId);
+                setInventorySlot(i, itemId, 1);
                 remaining--;
             }
         }
         if (remaining > 0)
         {
             Toolkit.getDefaultToolkit().beep();
+            log.warn("Could not place {} more items, inventory full", remaining);
         }
     }
 
-    private int countItemInInventory(int itemId)
+    private void placeStackInNextFreeSlot(int itemId, int quantity)
     {
-        int c = 0;
-        for (Integer id : inventoryIds)
+        log.info("Placing stack of {} x{} in next free slot", itemId, quantity);
+
+        for (int i = 0; i < INVENTORY_SIZE; i++)
         {
-            if (id != null && id == itemId) c++;
+            if (inventoryIds[i] == null)
+            {
+                setInventorySlot(i, itemId, Math.max(1, quantity));
+                log.info("Placed stack in slot {}", i);
+                return;
+            }
         }
-        return c;
+        Toolkit.getDefaultToolkit().beep();
+        log.warn("Could not place stack of {} x{}, inventory full", itemId, quantity);
+    }
+
+    private int totalAmountOfItem(int itemId)
+    {
+        int total = 0;
+        for (int i = 0; i < INVENTORY_SIZE; i++)
+        {
+            if (Objects.equals(inventoryIds[i], itemId))
+            {
+                total += Math.max(1, inventoryQtys[i]);
+            }
+        }
+        return total;
     }
 
     private List<Integer> findItemIndices(int itemId)
     {
         List<Integer> idxs = new ArrayList<>();
-        for (int i = 0; i < 28; i++)
+        for (int i = 0; i < INVENTORY_SIZE; i++)
         {
-            if (inventoryIds[i] != null && inventoryIds[i] == itemId)
+            if (Objects.equals(inventoryIds[i], itemId))
             {
                 idxs.add(i);
             }
@@ -542,68 +801,16 @@ public class LoadoutBuilderPanel extends PluginPanel
     private void removeAllOfItem(int itemId)
     {
         boolean removedAny = false;
-        for (int i = 0; i < 28; i++)
+        for (int i = 0; i < INVENTORY_SIZE; i++)
         {
-            if (inventoryIds[i] != null && inventoryIds[i] == itemId)
+            if (Objects.equals(inventoryIds[i], itemId))
             {
                 clearInventorySlot(i);
                 removedAny = true;
             }
         }
-        if (!removedAny)
-        {
+        if (!removedAny) {
             Toolkit.getDefaultToolkit().beep();
-        }
-    }
-
-    private void ensureItemCount(int itemId, int desired, int preferStartIndex)
-    {
-        if (desired < 0) desired = 0;
-
-        List<Integer> indices = findItemIndices(itemId);
-        int current = indices.size();
-
-        if (desired > 0 && (preferStartIndex >= 0 && preferStartIndex < 28))
-        {
-            if (inventoryIds[preferStartIndex] == null || !inventoryIds[preferStartIndex].equals(itemId))
-            {
-                setInventorySlot(preferStartIndex, itemId);
-                indices.add(preferStartIndex);
-                current++;
-            }
-        }
-
-        if (current > desired)
-        {
-            int toRemove = current - desired;
-
-            for (int i = indices.size() - 1; i >= 0 && toRemove > 0; i--)
-            {
-                int idx = indices.get(i);
-                if (idx == preferStartIndex) continue;
-                if (inventoryIds[idx] != null && inventoryIds[idx] == itemId)
-                {
-                    clearInventorySlot(idx);
-                    toRemove--;
-                }
-            }
-            for (int i = indices.size() - 1; i >= 0 && toRemove > 0; i--)
-            {
-                int idx = indices.get(i);
-                if (inventoryIds[idx] != null && inventoryIds[idx] == itemId)
-                {
-                    clearInventorySlot(idx);
-                    toRemove--;
-                }
-            }
-            return;
-        }
-
-        if (current < desired)
-        {
-            int shortage = desired - current;
-            int start = (preferStartIndex >= 0 && preferStartIndex < 28) ? (preferStartIndex + 1) : 0;
-            fillNextFreeSlots(itemId, shortage, start);
         }
     }
 
@@ -620,99 +827,19 @@ public class LoadoutBuilderPanel extends PluginPanel
             return;
         }
 
-        // Sett ikon asynkront – unngå "hover før synlig"
-        setButtonIconAsync(btn, id);
-        btn.setToolTipText("Item ID: " + id);
+        int qty = Math.max(1, inventoryQtys[index]);
+        iconUtil.setButtonIcon(btn, id, qty);
+
+        if (qty > 1)
+            btn.setToolTipText("Item ID: " + id + " (x" + qty + ")");
+        else
+            btn.setToolTipText("Item ID: " + id);
+
         revalidate();
         repaint();
     }
 
-    private void setButtonIconAsync(JButton btn, int itemId)
-    {
-        try
-        {
-            AsyncBufferedImage img = itemManager.getImage(itemId);
-            if (img == null)
-            {
-                btn.setIcon(null);
-                return;
-            }
-
-            // Sett ikon nå (kan være tom inntil lastet), og oppdater når ferdig
-            btn.setIcon(new ImageIcon(img));
-            img.onLoaded(() -> SwingUtilities.invokeLater(() ->
-            {
-                btn.setIcon(new ImageIcon(img));
-                btn.revalidate();
-                btn.repaint();
-            }));
-        }
-        catch (Exception e)
-        {
-            btn.setIcon(null);
-        }
-    }
-
-    private Image safeGetImage(int itemId)
-    {
-        try { return itemManager.getImage(itemId); }
-        catch (Throwable t) { return null; }
-    }
-
-    private String slotTooltip(EquipmentSlot slot)
-    {
-        switch (slot)
-        {
-            case HEAD: return "Helmet";
-            case CAPE: return "Cape";
-            case NECK: return "Amulet";
-            case AMMO: return "Ammo";
-            case WEAPON: return "Weapon";
-            case BODY: return "Body";
-            case SHIELD: return "Shield";
-            case LEGS: return "Legs";
-            case HANDS: return "Gloves";
-            case BOOTS: return "Boots";
-            case RING: return "Ring";
-            default: return slot.name();
-        }
-    }
-
-    private String slotCaption(EquipmentSlot slot)
-    {
-        switch (slot)
-        {
-            case HEAD: return "Head";
-            case CAPE: return "Cape";
-            case NECK: return "Amulet";
-            case AMMO: return "Ammo";
-            case WEAPON: return "Weapon";
-            case BODY: return "Body";
-            case SHIELD: return "Shield";
-            case LEGS: return "Legs";
-            case HANDS: return "Gloves";
-            case BOOTS: return "Boots";
-            case RING: return "Ring";
-            default: return slot.name();
-        }
-    }
-
-    private Integer promptAmount(String message, int defaultVal)
-    {
-        String s = JOptionPane.showInputDialog(this, message, String.valueOf(Math.max(0, defaultVal)));
-        if (s == null) return null;
-        try
-        {
-            int v = Integer.parseInt(s.trim());
-            return v >= 0 ? v : null;
-        }
-        catch (NumberFormatException ex)
-        {
-            return null;
-        }
-    }
-
-    // ---------- Loadout Text generering / copy / import ----------
+    // [Rest of methods remain unchanged - generateLoadoutText, copyLoadoutToClipboard, importFromText, parseEntries, helper methods]
 
     private void generateLoadoutText()
     {
@@ -722,38 +849,33 @@ public class LoadoutBuilderPanel extends PluginPanel
             StringBuilder sb = new StringBuilder();
 
             EquipmentSlot[] order = new EquipmentSlot[]{
-                    EquipmentSlot.BOOTS,   // B
-                    EquipmentSlot.NECK,    // N
-                    EquipmentSlot.SHIELD,  // S
-                    EquipmentSlot.CAPE,    // Ca
-                    EquipmentSlot.HANDS,   // G
-                    EquipmentSlot.BODY,    // C
-                    EquipmentSlot.HEAD,    // H
-                    EquipmentSlot.RING,    // R
-                    EquipmentSlot.LEGS,    // L
-                    EquipmentSlot.WEAPON,  // W
-                    EquipmentSlot.AMMO     // A
+                    EquipmentSlot.BOOTS, EquipmentSlot.NECK, EquipmentSlot.SHIELD, EquipmentSlot.CAPE,
+                    EquipmentSlot.HANDS, EquipmentSlot.BODY, EquipmentSlot.HEAD, EquipmentSlot.RING,
+                    EquipmentSlot.LEGS, EquipmentSlot.WEAPON, EquipmentSlot.AMMO
             };
 
             for (EquipmentSlot s : order)
             {
                 Integer id = equipped.get(s);
                 if (id == null) continue;
-                String name = getNameOnClientThread(id);
+                String name = itemResolver.getNameOnClientThread(id);
                 if (name == null || name.equalsIgnoreCase("null")) continue;
                 String code = codeForSlot(s);
-                sb.append(code).append(":").append(name).append(":1").append("\n");
+                int qty = Math.max(1, equippedQty.getOrDefault(s, 1));
+                sb.append(code).append(":").append(name).append(":").append(qty).append("\n");
             }
 
             LinkedHashMap<Integer, Integer> counts = new LinkedHashMap<>();
-            for (Integer id : inventoryIds)
+            for (int i = 0; i < INVENTORY_SIZE; i++)
             {
+                Integer id = inventoryIds[i];
                 if (id == null) continue;
-                counts.merge(id, 1, Integer::sum);
+                int qty = Math.max(1, inventoryQtys[i]);
+                counts.merge(id, qty, Integer::sum);
             }
             for (Map.Entry<Integer, Integer> e : counts.entrySet())
             {
-                String name = getNameOnClientThread(e.getKey());
+                String name = itemResolver.getNameOnClientThread(e.getKey());
                 if (name == null || name.equalsIgnoreCase("null")) continue;
                 sb.append("I:").append(name).append(":").append(e.getValue()).append("\n");
             }
@@ -802,6 +924,7 @@ public class LoadoutBuilderPanel extends PluginPanel
         importButton.setEnabled(false);
 
         List<ImportEntry> entries = parseEntries(original);
+        log.info("Importing {} entries from text", entries.size());
 
         clientThread.invoke(() ->
         {
@@ -812,33 +935,42 @@ public class LoadoutBuilderPanel extends PluginPanel
             {
                 String name = entry.itemName;
                 if (resolved.containsKey(name)) continue;
-                Integer id = resolveItemIdByName(name);
-                if (id == null)
-                {
+                Integer id = itemResolver.resolve(name);
+                if (id == null) {
                     notFound.add(name);
+                    log.warn("Could not resolve item name: '{}'", name);
+                } else {
+                    log.info("Resolved '{}' to item {}", name, id);
                 }
                 resolved.put(name, id);
             }
 
             Map<EquipmentSlot, Integer> equipToSet = new EnumMap<>(EquipmentSlot.class);
+            Map<EquipmentSlot, Integer> equipQtyToSet = new EnumMap<>(EquipmentSlot.class);
             LinkedHashMap<Integer, Integer> invCounts = new LinkedHashMap<>();
 
             for (ImportEntry entry : entries)
             {
                 Integer id = resolved.get(entry.itemName);
                 if (id == null) continue;
+
+                int canonId = itemManager.canonicalize(id);
+
                 if (entry.isInventory)
                 {
-                    int count = entry.amount < 0 ? 28 : entry.amount;
-                    invCounts.merge(id, count, Integer::sum);
+                    int count = entry.amount < 0 ? INVENTORY_SIZE : entry.amount;
+                    invCounts.merge(canonId, count, Integer::sum);
+                    log.info("Import: inventory item '{}' (id {}) x{}", entry.itemName, canonId, count);
                 }
                 else if (entry.slot != null)
                 {
-                    equipToSet.put(entry.slot, id);
+                    equipToSet.put(entry.slot, canonId);
+                    int eqQty = entry.amount < 0 ? 1 : Math.max(1, entry.amount);
+                    equipQtyToSet.put(entry.slot, eqQty);
+                    log.info("Import: equipment {} item '{}' (id {}) x{}", entry.slot, entry.itemName, canonId, eqQty);
                 }
             }
 
-            // For tooltip/tekst – hent navn for alle relevante id-er
             Set<Integer> allIds = new HashSet<>();
             allIds.addAll(equipToSet.values());
             allIds.addAll(invCounts.keySet());
@@ -846,7 +978,7 @@ public class LoadoutBuilderPanel extends PluginPanel
             for (Integer id : allIds)
             {
                 if (id == null) continue;
-                String nm = getNameOnClientThread(id);
+                String nm = itemResolver.getNameOnClientThread(id);
                 idToName.put(id, nm != null ? nm : ("ID " + id));
             }
 
@@ -854,21 +986,25 @@ public class LoadoutBuilderPanel extends PluginPanel
             {
                 try
                 {
+                    log.info("Clearing all equipment and inventory for import");
                     clearAllEquipment();
                     clearInventoryAll();
 
+                    // Equipment
                     for (Map.Entry<EquipmentSlot, Integer> e : equipToSet.entrySet())
                     {
-                        Integer id = e.getValue();
+                        EquipmentSlot slot = e.getKey();
+                        int id = e.getValue();
+                        int qty = Math.max(1, equipQtyToSet.getOrDefault(slot, 1));
                         String name = idToName.getOrDefault(id, "ID " + id);
-                        setEquipmentItem(e.getKey(), id, name);
+                        setEquipmentItem(slot, id, name, qty);
                     }
 
-                    for (Map.Entry<Integer, Integer> e : invCounts.entrySet())
+                    // Inventory
+                    for (Map.Entry<Integer, Integer> e2 : invCounts.entrySet())
                     {
-                        int id = e.getKey();
-                        int count = Math.max(0, Math.min(28, e.getValue()));
-                        fillNextFreeSlots(id, count, 0);
+                        log.info("Import: setting inventory item {} to amount {}", e2.getKey(), e2.getValue());
+                        ensureItemCountAsync(e2.getKey(), Math.max(0, e2.getValue()), 0);
                     }
 
                     loadoutArea.setText(original);
@@ -897,7 +1033,7 @@ public class LoadoutBuilderPanel extends PluginPanel
         final boolean isInventory;
         final EquipmentSlot slot;
         final String itemName;
-        final int amount; // -1 betyr '*'
+        final int amount;
 
         ImportEntry(boolean isInventory, EquipmentSlot slot, String itemName, int amount)
         {
@@ -929,8 +1065,12 @@ public class LoadoutBuilderPanel extends PluginPanel
             if (amtStr.equals("*")) amount = -1;
             else
             {
-                try { amount = Integer.parseInt(amtStr); }
-                catch (NumberFormatException ignored) { amount = 1; }
+                try {
+                    amount = Integer.parseInt(amtStr);
+                }
+                catch (NumberFormatException ignored) {
+                    amount = 1;
+                }
             }
 
             EquipmentSlot slot = codeToSlot(codeRaw);
@@ -947,6 +1087,45 @@ public class LoadoutBuilderPanel extends PluginPanel
             }
         }
         return list;
+    }
+
+    // Helper methods (unchanged)
+    private String slotTooltip(EquipmentSlot slot)
+    {
+        switch (slot)
+        {
+            case HEAD: return "Helmet";
+            case CAPE: return "Cape";
+            case NECK: return "Amulet";
+            case AMMO: return "Ammo";
+            case WEAPON: return "Weapon";
+            case BODY: return "Body";
+            case SHIELD: return "Shield";
+            case LEGS: return "Legs";
+            case HANDS: return "Gloves";
+            case BOOTS: return "Boots";
+            case RING: return "Ring";
+            default: return slot.name();
+        }
+    }
+
+    private String slotCaption(EquipmentSlot slot)
+    {
+        switch (slot)
+        {
+            case HEAD: return "Head";
+            case CAPE: return "Cape";
+            case NECK: return "Amulet";
+            case AMMO: return "Ammo";
+            case WEAPON: return "Weapon";
+            case BODY: return "Body";
+            case SHIELD: return "Shield";
+            case LEGS: return "Legs";
+            case HANDS: return "Gloves";
+            case BOOTS: return "Boots";
+            case RING: return "Ring";
+            default: return slot.name();
+        }
     }
 
     private EquipmentSlot codeToSlot(String codeRaw)
@@ -968,173 +1147,6 @@ public class LoadoutBuilderPanel extends PluginPanel
             case "W": return EquipmentSlot.WEAPON;
             case "A": return EquipmentSlot.AMMO;
             default: return null;
-        }
-    }
-
-    // Må kalles på ClientThread
-    private String getNameOnClientThread(int itemId)
-    {
-        try
-        {
-            return itemManager.getItemComposition(itemId).getName();
-        }
-        catch (Exception e)
-        {
-            return null;
-        }
-    }
-
-    // Bygg navneindeks én gang (ekskluder noted/placeholder via canonicalize)
-    private void buildNameIndexIfNeeded()
-    {
-        if (nameIndexBuilt) return;
-
-        for (int id = 0; id <= MAX_ITEM_ID; id++)
-        {
-            try
-            {
-                String n = itemManager.getItemComposition(id).getName();
-                if (n == null || n.equalsIgnoreCase("null")) continue;
-
-                int canon = itemManager.canonicalize(id);
-                String key = n.toLowerCase(Locale.ROOT);
-
-                // lagre base-varianten
-                nameToIdCache.putIfAbsent(key, canon);
-            }
-            catch (Exception ignored) {}
-        }
-        nameIndexBuilt = true;
-    }
-
-    // Søk uten ItemManager.Item-typen (refleksjon på search-resultater) med presisjon først
-    private Integer resolveItemIdByName(String name)
-    {
-        if (name == null || name.isEmpty()) return null;
-        final String qLower = name.toLowerCase(Locale.ROOT);
-
-        // 1) Raskt søk (tradeables): eksakt match først
-        try
-        {
-            List<?> results = itemManager.search(name);
-            Integer exact = null;
-            List<Integer> contains = new ArrayList<>();
-
-            for (Object itObj : results)
-            {
-                String itName = getNameViaReflection(itObj);
-                Integer itId = getIdViaReflection(itObj);
-                if (itName == null || itId == null) continue;
-
-                if (itName.equalsIgnoreCase(name))
-                {
-                    exact = itemManager.canonicalize(itId);
-                    break;
-                }
-                if (itName.toLowerCase(Locale.ROOT).contains(qLower))
-                {
-                    contains.add(itemManager.canonicalize(itId));
-                }
-            }
-            if (exact != null) return exact;
-
-            // 2) Full indeks – eksakt navn på tvers av alle items
-            buildNameIndexIfNeeded();
-            Integer idxId = nameToIdCache.get(qLower);
-            if (idxId != null) return idxId;
-
-            // 3) Heuristisk contains fra søk – unngå "page set", " set"
-            Integer best = pickBestContains(results, name);
-            if (best != null) return itemManager.canonicalize(best);
-        }
-        catch (Exception ignored)
-        {
-            // fallbacks under
-        }
-
-        // 4) Fallback: lineær contains i indeks (billig etter cache)
-        int bestScore = Integer.MIN_VALUE;
-        Integer bestId = null;
-        for (Map.Entry<String, Integer> e : nameToIdCache.entrySet())
-        {
-            String nm = e.getKey();
-            if (!nm.contains(qLower)) continue;
-            int score = scoreNameContains(nm, qLower);
-            if (score > bestScore)
-            {
-                bestScore = score;
-                bestId = e.getValue();
-            }
-        }
-
-        return bestId;
-    }
-
-    private Integer pickBestContains(List<?> results, String query)
-    {
-        String q = query.toLowerCase(Locale.ROOT);
-        int bestScore = Integer.MIN_VALUE;
-        Integer bestId = null;
-
-        for (Object itObj : results)
-        {
-            String itName = getNameViaReflection(itObj);
-            Integer itId = getIdViaReflection(itObj);
-            if (itName == null || itId == null) continue;
-
-            String nm = itName.toLowerCase(Locale.ROOT);
-            if (!nm.contains(q)) continue;
-
-            int score = scoreNameContains(nm, q);
-            if (score > bestScore)
-            {
-                bestScore = score;
-                bestId = itId;
-            }
-        }
-        return bestId;
-    }
-
-    // Høyere score = bedre. Straff " page set"/" set", belønn prefix og kort lengdeforskjell.
-    private int scoreNameContains(String candidateLower, String queryLower)
-    {
-        int score = 0;
-        if (candidateLower.startsWith(queryLower)) score += 5;
-        score -= Math.abs(candidateLower.length() - queryLower.length()); // kortere diff er bedre
-        if (candidateLower.contains(" page set")) score -= 8;
-        if (candidateLower.endsWith(" set")) score -= 6;
-        if (candidateLower.contains(" placeholder")) score -= 4;
-        if (candidateLower.contains(" noted")) score -= 4;
-        return score;
-    }
-
-    private String getNameViaReflection(Object itObj)
-    {
-        try
-        {
-            Method m = itObj.getClass().getMethod("getName");
-            Object v = m.invoke(itObj);
-            return (v instanceof String) ? (String) v : null;
-        }
-        catch (Exception e)
-        {
-            return null;
-        }
-    }
-
-    private Integer getIdViaReflection(Object itObj)
-    {
-        try
-        {
-            Method m = itObj.getClass().getMethod("getId");
-            Object v = m.invoke(itObj);
-            if (v instanceof Integer) return (Integer) v;
-            if (v instanceof Number) return ((Number) v).intValue();
-            return null;
-        }
-        catch (Exception e)
-        {
-            return null;
         }
     }
 
