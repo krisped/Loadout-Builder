@@ -12,17 +12,18 @@ import net.runelite.api.ItemComposition;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.ui.ColorScheme;
+import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
 
 import javax.swing.*;
+import javax.swing.border.EmptyBorder;
 import javax.swing.border.TitledBorder;
 import java.awt.BorderLayout;
-import java.awt.Color;
 import java.awt.Component;
 import java.awt.Dimension;
-import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.GridLayout;
+import java.awt.Insets;
 import java.awt.Toolkit;
 import java.awt.datatransfer.StringSelection;
 import java.awt.image.BufferedImage;
@@ -31,27 +32,34 @@ import java.util.*;
 import java.util.List;
 
 /**
- * Panel for building a loadout: equipment + inventory,
- * Repcal/KittyKeys eksport, import og clipboard export.
- *
- * KittyKeys:
- *  - WITHDRAW <sanitert>
- *  - BANK_WIELD <samme sanitize>
- *
- * JSON-import støttes (innliming i tekstfelt + Import).
- *
- * Sanitizing-krav:
- *  - Lowercase (ikke uppercase)
- *  - Behold eksisterende parenteser
- *  - Sett inn underscore før '(' hvis den kommer direkte etter et ordtegn
- *  - Fjern andre tegn -> space, normaliser til underscore
+ * Loadout builder – dynamic width, compact spacing.
+ * This revision:
+ *  - Removed help button.
+ *  - All UI text, tooltips, dialogs translated to English.
+ *  - Short button labels (Repcal, KittyKeys, Import, Export).
+ *  - Slot labels font one step smaller than previous (reduced from 15f -> 14f).
  */
 public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.SlotActionHandler
 {
-    private static final int EQUIPMENT_GRID_HGAP = 4;
-    private static final int EQUIPMENT_GRID_VGAP = 4;
-    private static final int INVENTORY_GRID_HGAP = 4;
-    private static final int INVENTORY_GRID_VGAP = 4;
+    private static final int EQUIPMENT_GRID_HGAP = 0;
+    private static final int EQUIPMENT_GRID_VGAP = 0;
+    private static final int INVENTORY_GRID_HGAP = 0;
+    private static final int INVENTORY_GRID_VGAP = 0;
+
+    private static final int EQUIPMENT_SECTION_MAX_H = 300;
+    private static final int INVENTORY_SECTION_MAX_H = 500;
+    private static final int LOADOUT_SECTION_MAX_H   = 300;
+
+    // Font configuration
+    private static final float TITLE_FONT_SIZE      = 16f;
+    private static final float SLOT_LABEL_FONT_SIZE = 14f;   // one notch smaller now
+    private static final float BUTTON_FONT_SIZE     = 15.5f;
+    private static final float TEXTAREA_FONT_SIZE   = 14f;
+    private static final int   BUTTON_HEIGHT        = 28;
+
+    private Font runescape;
+    private Font runescapeBold;
+    private Font fallback;
 
     private final ItemManager itemManager;
     private final ClientThread clientThread;
@@ -59,12 +67,11 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
 
     private final Map<EquipmentInventorySlot, LoadoutSlot> equipmentSlots = new EnumMap<>(EquipmentInventorySlot.class);
     private final JPanel equipmentPanel = new JPanel();
-
     private final LoadoutSlot[] inventorySlots = new LoadoutSlot[28];
     private final JPanel inventoryPanel = new JPanel();
 
-    private final JButton resetButton = new JButton("Reset All");
-    private final JButton copyButton  = new JButton("Copy Loadout");
+    private JButton copyButton;
+    private JButton resetButton;
 
     private JTextArea repcalArea;
     private JButton repcalButton;
@@ -73,25 +80,23 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
     private JButton exportButton;
 
     private final Gson gson = new Gson();
-
     private JPanel contentPanel;
 
-    // Mapping av eq-array index til faktiske slots (null = placeholder/hopp over)
     private static final EquipmentInventorySlot[] EQ_INDEX_MAP = new EquipmentInventorySlot[]{
-            EquipmentInventorySlot.HEAD,   // 0
-            EquipmentInventorySlot.CAPE,   // 1
-            EquipmentInventorySlot.AMULET, // 2
-            EquipmentInventorySlot.WEAPON, // 3
-            EquipmentInventorySlot.BODY,   // 4
-            EquipmentInventorySlot.SHIELD, // 5
-            null,                          // 6 placeholder
-            EquipmentInventorySlot.LEGS,   // 7
-            null,                          // 8 placeholder
-            EquipmentInventorySlot.GLOVES, // 9
-            EquipmentInventorySlot.BOOTS,  // 10
-            null,                          // 11 placeholder
-            EquipmentInventorySlot.RING,   // 12
-            EquipmentInventorySlot.AMMO    // 13
+            EquipmentInventorySlot.HEAD,
+            EquipmentInventorySlot.CAPE,
+            EquipmentInventorySlot.AMULET,
+            EquipmentInventorySlot.WEAPON,
+            EquipmentInventorySlot.BODY,
+            EquipmentInventorySlot.SHIELD,
+            null,
+            EquipmentInventorySlot.LEGS,
+            null,
+            EquipmentInventorySlot.GLOVES,
+            EquipmentInventorySlot.BOOTS,
+            null,
+            EquipmentInventorySlot.RING,
+            EquipmentInventorySlot.AMMO
     };
 
     public LoadoutBuilderPanel(ItemManager itemManager, ClientThread clientThread, Client client)
@@ -100,10 +105,27 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         this.itemManager = itemManager;
         this.clientThread = clientThread;
         this.client = client;
+        setBackground(ColorScheme.DARK_GRAY_COLOR);
+        initFonts();
         buildUI();
     }
 
-    /* ================= UI BUILD (scrollable) ================= */
+    private void initFonts()
+    {
+        try
+        {
+            runescape = FontManager.getRunescapeFont();
+            runescapeBold = FontManager.getRunescapeBoldFont();
+        }
+        catch (Throwable t)
+        {
+            runescape = new Font("Dialog", Font.PLAIN, 14);
+            runescapeBold = runescape.deriveFont(Font.BOLD);
+        }
+        fallback = new Font("Dialog", Font.PLAIN, 14);
+    }
+
+    /* ================= UI ================= */
 
     private void buildUI()
     {
@@ -111,14 +133,14 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
 
         contentPanel = new JPanel();
         contentPanel.setLayout(new BoxLayout(contentPanel, BoxLayout.Y_AXIS));
-        contentPanel.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        contentPanel.setOpaque(false);
 
-        buildEquipmentPanel();
-        contentPanel.add(Box.createVerticalStrut(10));
-        buildInventoryPanel();
-        contentPanel.add(Box.createVerticalStrut(10));
+        buildEquipmentSection();
+        contentPanel.add(Box.createVerticalStrut(2));
+        buildInventorySection();
+        contentPanel.add(Box.createVerticalStrut(2));
         buildLoadoutSection();
-        contentPanel.add(Box.createVerticalGlue());
+        contentPanel.add(Box.createVerticalStrut(2));
 
         JScrollPane scroll = new JScrollPane(contentPanel,
                 JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED,
@@ -130,15 +152,59 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         add(scroll, BorderLayout.CENTER);
     }
 
-    private void buildEquipmentPanel()
+    private TitledBorder titled(String title)
     {
-        JPanel wrapper = new JPanel(new BorderLayout(0,6));
-        wrapper.setBorder(new TitledBorder("Equipment"));
-        wrapper.setOpaque(false);
-        wrapper.setMaximumSize(new Dimension(Integer.MAX_VALUE, 380));
+        Font f = (runescapeBold != null ? runescapeBold : fallback).deriveFont(Font.BOLD, TITLE_FONT_SIZE);
+        TitledBorder tb = new TitledBorder(title);
+        tb.setTitleFont(f);
+        return tb;
+    }
+
+    private JPanel sectionWrapper(String title, int maxHeight)
+    {
+        JPanel p = new JPanel(new BorderLayout(0,0));
+        p.setOpaque(false);
+        p.setBorder(BorderFactory.createCompoundBorder(
+                titled(title),
+                new EmptyBorder(2,2,2,2)
+        ));
+        p.setMaximumSize(new Dimension(Integer.MAX_VALUE, maxHeight));
+        p.setAlignmentX(Component.LEFT_ALIGNMENT);
+        return p;
+    }
+
+    private JButton makeButton(String text)
+    {
+        Font base = (runescape != null ? runescape : fallback).deriveFont(Font.PLAIN, BUTTON_FONT_SIZE);
+        JButton b = new JButton(text);
+        b.setFont(base);
+        b.setMargin(new Insets(2,10,2,10));
+        b.setFocusPainted(false);
+        // Keep native RL look (no custom background)
+        b.setPreferredSize(new Dimension(10, BUTTON_HEIGHT));
+        b.setMinimumSize(new Dimension(10, BUTTON_HEIGHT));
+        b.setMaximumSize(new Dimension(Integer.MAX_VALUE, BUTTON_HEIGHT));
+        return b;
+    }
+
+    private JLabel makeSlotLabel(String text)
+    {
+        Font f = (runescapeBold != null ? runescapeBold : fallback).deriveFont(Font.BOLD, SLOT_LABEL_FONT_SIZE);
+        JLabel lbl = new JLabel(text, SwingConstants.CENTER);
+        lbl.setFont(f);
+        lbl.setForeground(new java.awt.Color(230,230,230));
+        lbl.setAlignmentX(Component.CENTER_ALIGNMENT);
+        lbl.setBorder(new EmptyBorder(1,0,0,0));
+        return lbl;
+    }
+
+    private void buildEquipmentSection()
+    {
+        JPanel wrapper = sectionWrapper("Equipment", EQUIPMENT_SECTION_MAX_H);
 
         equipmentPanel.setLayout(new GridLayout(5, 3, EQUIPMENT_GRID_HGAP, EQUIPMENT_GRID_VGAP));
         equipmentPanel.setOpaque(false);
+        equipmentPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         for (EquipmentInventorySlot slot : EquipmentInventorySlot.values())
         {
@@ -167,10 +233,15 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
 
         wrapper.add(equipmentPanel, BorderLayout.CENTER);
 
-        JPanel buttonRow = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 4));
+        JPanel buttonRow = new JPanel(new GridLayout(1,2,2,0));
         buttonRow.setOpaque(false);
-        resetButton.addActionListener(e -> resetAll());
+        buttonRow.setBorder(new EmptyBorder(2,0,0,0));
+        copyButton = makeButton("Copy equipped");
+        resetButton = makeButton("Clear all");
+        copyButton.setToolTipText("Copy current equipment + inventory from the live client into the builder.");
+        resetButton.setToolTipText("Clear all equipment slots, inventory slots and the text area.");
         copyButton.addActionListener(e -> copyLoadout());
+        resetButton.addActionListener(e -> resetAll());
         buttonRow.add(copyButton);
         buttonRow.add(resetButton);
         wrapper.add(buttonRow, BorderLayout.SOUTH);
@@ -187,7 +258,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
 
         if (slot == null)
         {
-            cell.add(Box.createVerticalStrut(48));
+            cell.add(Box.createVerticalStrut(46));
             equipmentPanel.add(cell);
             return;
         }
@@ -195,36 +266,26 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         LoadoutSlot ls = equipmentSlots.get(slot);
         ls.setAlignmentX(Component.CENTER_ALIGNMENT);
         cell.add(ls);
-
-        JLabel lbl = new JLabel(labelText, SwingConstants.CENTER);
-        lbl.setFont(lbl.getFont().deriveFont(Font.BOLD, 12f));
-        lbl.setForeground(new Color(215, 215, 215));
-        lbl.setAlignmentX(Component.CENTER_ALIGNMENT);
-        lbl.setBorder(BorderFactory.createEmptyBorder(3, 0, 0, 0));
-        cell.add(lbl);
-
+        cell.add(makeSlotLabel(labelText));
         equipmentPanel.add(cell);
     }
 
-    private void buildInventoryPanel()
+    private void buildInventorySection()
     {
-        JPanel wrapper = new JPanel(new BorderLayout());
-        wrapper.setBorder(new TitledBorder("Inventory"));
-        wrapper.setOpaque(false);
-        wrapper.setMaximumSize(new Dimension(Integer.MAX_VALUE, 580));
+        JPanel wrapper = sectionWrapper("Inventory", INVENTORY_SECTION_MAX_H);
 
         inventoryPanel.setLayout(new GridLayout(7, 4, INVENTORY_GRID_HGAP, INVENTORY_GRID_VGAP));
         inventoryPanel.setOpaque(false);
+        inventoryPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         for (int i = 0; i < 28; i++)
         {
             inventorySlots[i] = new LoadoutSlot(itemManager, this, i, false);
-            JPanel c = new JPanel();
-            c.setOpaque(false);
-            c.setLayout(new BoxLayout(c, BoxLayout.Y_AXIS));
-            inventorySlots[i].setAlignmentX(Component.CENTER_ALIGNMENT);
-            c.add(inventorySlots[i]);
-            inventoryPanel.add(c);
+            JPanel slotHolder = new JPanel();
+            slotHolder.setOpaque(false);
+            slotHolder.setLayout(new BoxLayout(slotHolder, BoxLayout.Y_AXIS));
+            slotHolder.add(inventorySlots[i]);
+            inventoryPanel.add(slotHolder);
         }
 
         wrapper.add(inventoryPanel, BorderLayout.CENTER);
@@ -233,39 +294,53 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
 
     private void buildLoadoutSection()
     {
-        JPanel wrapper = new JPanel(new BorderLayout(4,4));
-        wrapper.setBorder(new TitledBorder("Loadout"));
-        wrapper.setOpaque(false);
-        wrapper.setMaximumSize(new Dimension(Integer.MAX_VALUE, 350));
+        JPanel wrapper = sectionWrapper("Loadout", LOADOUT_SECTION_MAX_H);
+        wrapper.setLayout(new BorderLayout(0,2));
 
         repcalArea = new JTextArea();
         repcalArea.setEditable(true);
-        repcalArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 13));
-        repcalArea.setLineWrap(false);
-        repcalArea.setRows(14);
+        repcalArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, (int)TEXTAREA_FONT_SIZE));
+        repcalArea.setLineWrap(true);
+        repcalArea.setWrapStyleWord(false);
+        repcalArea.setRows(10);
+        repcalArea.setTabSize(4);
 
-        JScrollPane sp = new JScrollPane(repcalArea);
-        wrapper.add(sp, BorderLayout.CENTER);
+        JScrollPane inner = new JScrollPane(repcalArea,
+                JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED,
+                JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        inner.setBorder(BorderFactory.createLineBorder(new java.awt.Color(70,70,70)));
 
-        JPanel buttonsGrid = new JPanel(new GridLayout(2,2,6,6));
-        buttonsGrid.setOpaque(false);
+        wrapper.add(inner, BorderLayout.CENTER);
 
-        repcalButton = new JButton("Repcal");
-        kittyKeysButton = new JButton("KittyKeys");
-        importButton = new JButton("Import");
-        exportButton = new JButton("Export");
+        JPanel bottomRow = new JPanel(new BorderLayout(4,0));
+        bottomRow.setOpaque(false);
+
+        JPanel buttonGrid = new JPanel(new GridLayout(2,2,2,2));
+        buttonGrid.setOpaque(false);
+
+        repcalButton    = makeButton("Repcal");
+        kittyKeysButton = makeButton("KittyKeys");
+        importButton    = makeButton("Import");
+        exportButton    = makeButton("Export");
+
+        repcalButton.setToolTipText("Generate Repcal formatted lines from the current loadout.");
+        kittyKeysButton.setToolTipText("Generate WITHDRAW + BANK_WIELD script lines for KittyKeys.");
+        importButton.setToolTipText("Import Repcal lines or JSON from the text area.");
+        exportButton.setToolTipText("Copy the current text area contents to clipboard.");
 
         repcalButton.addActionListener(e -> generateRepcalString());
         kittyKeysButton.addActionListener(e -> generateKittyKeysScript());
         importButton.addActionListener(e -> importRepcalCodes());
         exportButton.addActionListener(e -> exportToClipboard());
 
-        buttonsGrid.add(repcalButton);
-        buttonsGrid.add(kittyKeysButton);
-        buttonsGrid.add(importButton);
-        buttonsGrid.add(exportButton);
+        buttonGrid.add(repcalButton);
+        buttonGrid.add(kittyKeysButton);
+        buttonGrid.add(importButton);
+        buttonGrid.add(exportButton);
 
-        wrapper.add(buttonsGrid, BorderLayout.SOUTH);
+        bottomRow.add(buttonGrid, BorderLayout.CENTER);
+
+        wrapper.add(bottomRow, BorderLayout.SOUTH);
         contentPanel.add(wrapper);
     }
 
@@ -273,8 +348,8 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
 
     private void resetAll()
     {
-        for (LoadoutSlot slot : equipmentSlots.values()) slot.clear();
-        for (LoadoutSlot slot : inventorySlots) slot.clear();
+        for (LoadoutSlot s : equipmentSlots.values()) s.clear();
+        for (LoadoutSlot s : inventorySlots) s.clear();
         repcalArea.setText("");
     }
 
@@ -327,23 +402,23 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         String text = repcalArea.getText();
         if (text == null || text.isEmpty())
         {
-            JOptionPane.showMessageDialog(this, "Ingen tekst å kopiere. Generer først (Repcal / KittyKeys).", "Export", JOptionPane.INFORMATION_MESSAGE);
+            JOptionPane.showMessageDialog(this, "No text to copy.", "Export", JOptionPane.INFORMATION_MESSAGE);
             return;
         }
         copyToClipboard(text);
-        JOptionPane.showMessageDialog(this, "Loadout kopiert til clipboard.", "Export", JOptionPane.INFORMATION_MESSAGE);
+        JOptionPane.showMessageDialog(this, "Copied to clipboard.", "Export", JOptionPane.INFORMATION_MESSAGE);
     }
 
     private void copyToClipboard(String s)
     {
         try
         {
-            Toolkit.getDefaultToolkit().getSystemClipboard()
-                    .setContents(new StringSelection(s), null);
+            Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(s), null);
         }
         catch (Exception ex)
         {
-            JOptionPane.showMessageDialog(this, "Kunne ikke kopiere: " + ex.getMessage(), "Clipboard feil", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this, "Clipboard error: " + ex.getMessage(),
+                    "Error", JOptionPane.ERROR_MESSAGE);
         }
     }
 
@@ -353,7 +428,6 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
     {
         clientThread.invoke(() -> {
             StringBuilder sb = new StringBuilder();
-
             EquipmentInventorySlot[] order = {
                     EquipmentInventorySlot.BOOTS,
                     EquipmentInventorySlot.AMULET,
@@ -380,7 +454,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
                 sb.append(code).append(":").append(name).append(":").append(qtyString).append("\n");
             }
 
-            LinkedHashMap<String, Integer> invCounts = new LinkedHashMap<>();
+            LinkedHashMap<String,Integer> invCounts = new LinkedHashMap<>();
             for (LoadoutSlot ls : inventorySlots)
             {
                 if (ls.getItemId() <= 0) continue;
@@ -388,24 +462,23 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
                 int add = ls.isStackable() ? Math.max(1, ls.getQuantity()) : 1;
                 invCounts.merge(name, add, Integer::sum);
             }
-
-            for (Map.Entry<String, Integer> e : invCounts.entrySet())
-            {
+            for (Map.Entry<String,Integer> e : invCounts.entrySet())
                 sb.append("I:").append(e.getKey()).append(":").append(e.getValue()).append("\n");
-            }
 
-            final String output = sb.toString().trim();
-            SwingUtilities.invokeLater(() -> repcalArea.setText(output));
+            String out = sb.toString().trim();
+            SwingUtilities.invokeLater(() -> {
+                repcalArea.setText(out);
+                repcalArea.setCaretPosition(0);
+            });
         });
     }
 
-    /* ================= KITTYKEYS EXPORT (BANK_WIELD) ================= */
+    /* ================= KITTYKEYS EXPORT ================= */
 
     private void generateKittyKeysScript()
     {
         clientThread.invoke(() -> {
             StringBuilder sb = new StringBuilder();
-
             EquipmentInventorySlot[] order = {
                     EquipmentInventorySlot.HEAD,
                     EquipmentInventorySlot.BODY,
@@ -420,168 +493,133 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
                     EquipmentInventorySlot.AMMO
             };
 
-            LinkedHashMap<EquipmentInventorySlot, String> sanitizedNames = new LinkedHashMap<>();
-
+            LinkedHashMap<EquipmentInventorySlot,String> names = new LinkedHashMap<>();
             for (EquipmentInventorySlot slot : order)
             {
                 LoadoutSlot ls = equipmentSlots.get(slot);
                 if (ls != null && ls.getItemId() > 0)
                 {
-                    String rawName = resolveName(ls);
-                    String sanitized = kittyKeysItemName(rawName);
-                    String qty = isWeaponOrAmmoWildcard(slot, ls, rawName)
+                    String raw = resolveName(ls);
+                    String sanitized = kittyKeysItemName(raw);
+                    String qty = isWeaponOrAmmoWildcard(slot, ls, raw)
                             ? "*"
                             : Integer.toString(Math.max(1, ls.getQuantity()));
                     sb.append("WITHDRAW ").append(sanitized).append(" ").append(qty).append("\n");
-                    sanitizedNames.put(slot, sanitized);
+                    names.put(slot, sanitized);
                 }
             }
-            if (!sanitizedNames.isEmpty()) sb.append("\n");
+            if (!names.isEmpty()) sb.append("\n");
+            for (String n : names.values())
+                sb.append("BANK_WIELD ").append(n).append("\n");
+            if (!names.isEmpty()) sb.append("\n");
 
-            // Endret: BANK_WIELD
-            for (String sanitized : sanitizedNames.values())
-            {
-                sb.append("BANK_WIELD ").append(sanitized).append("\n");
-            }
-            if (!sanitizedNames.isEmpty()) sb.append("\n");
-
-            LinkedHashMap<String, Integer> invCounts = new LinkedHashMap<>();
+            LinkedHashMap<String,Integer> invCounts = new LinkedHashMap<>();
             for (LoadoutSlot ls : inventorySlots)
             {
                 if (ls.getItemId() <= 0) continue;
-                String rawName = resolveName(ls);
+                String raw = resolveName(ls);
                 int add = ls.isStackable() ? Math.max(1, ls.getQuantity()) : 1;
-                invCounts.merge(rawName, add, Integer::sum);
+                invCounts.merge(raw, add, Integer::sum);
             }
-            for (Map.Entry<String, Integer> e : invCounts.entrySet())
-            {
-                String sanitized = kittyKeysItemName(e.getKey());
-                sb.append("WITHDRAW ").append(sanitized).append(" ").append(e.getValue()).append("\n");
-            }
+            for (Map.Entry<String,Integer> e : invCounts.entrySet())
+                sb.append("WITHDRAW ").append(kittyKeysItemName(e.getKey())).append(" ").append(e.getValue()).append("\n");
 
-            final String output = sb.toString().trim();
-            SwingUtilities.invokeLater(() -> repcalArea.setText(output));
+            String out = sb.toString().trim();
+            SwingUtilities.invokeLater(() -> {
+                repcalArea.setText(out);
+                repcalArea.setCaretPosition(0);
+            });
         });
     }
 
-    /**
-     * KittyKeys navn-sanitering:
-     * - Behold parenteser (ikke fjern, ikke legg til).
-     * - Underscore før '(' hvis den følger rett etter ordtegn/apostrof.
-     * - Fjern andre spesialtegn -> space.
-     * - Kollaps spaces -> underscore, kollaps flere underscores.
-     * - Trim underscores i start/slutt.
-     * - Lowercase.
-     */
     private String kittyKeysItemName(String name)
     {
         if (name == null) return "";
-        String out = name;
-        out = out.replace("’", "'");
-
-        // Legg til underscore før '(' hvis direkte etter ordtegn/ apostrof og ikke allerede space/underscore
-        out = out.replaceAll("(?<![\\s_])\\(", "_(");
-
-        // Tillat bokstaver/tall/space/() – andre tegn til space
-        out = out.replaceAll("[^A-Za-z0-9() ]", " ");
-
-        // Trim -> spaces til underscore
-        out = out.trim().replaceAll("\\s+", "_");
-        // Kollaps flere underscores
-        out = out.replaceAll("_+", "_");
-        // Fjern leading/trailing underscore
-        out = out.replaceAll("^_+", "").replaceAll("_+$", "");
-        // Lowercase
-        out = out.toLowerCase(Locale.ROOT);
-        return out;
+        return name.trim()
+                .replace("’", "'")
+                .toLowerCase(Locale.ROOT)
+                .replaceAll("\\s+", "_");
     }
 
-    /* ================= IMPORT (Repcal + JSON autodetect) ================= */
+    /* ================= IMPORT (Repcal + JSON) ================= */
 
     private void importRepcalCodes()
     {
         String text = repcalArea.getText();
         if (text == null || text.trim().isEmpty())
         {
-            JOptionPane.showMessageDialog(this, "Ingen kode å importere.", "Import", JOptionPane.INFORMATION_MESSAGE);
+            JOptionPane.showMessageDialog(this, "No code to import.", "Import", JOptionPane.INFORMATION_MESSAGE);
             return;
         }
 
         String trimmed = text.trim();
         if (looksLikeJsonLoadout(trimmed))
         {
-            if (importJsonLoadout(trimmed))
-                return;
+            if (importJsonLoadout(trimmed)) return;
         }
 
         List<RepcalLine> lines = parseRepcalLines(text);
         if (lines.isEmpty())
         {
-            JOptionPane.showMessageDialog(this, "Fant ingen gyldige linjer.", "Import", JOptionPane.WARNING_MESSAGE);
+            JOptionPane.showMessageDialog(this, "No valid lines found.", "Import", JOptionPane.WARNING_MESSAGE);
             return;
         }
 
-        Set<String> equipmentCodesInInput = new HashSet<>();
-        boolean hasInventory = false;
+        Set<String> eqCodes = new HashSet<>();
+        boolean hasInv = false;
         for (RepcalLine l : lines)
         {
-            if (l.code.equalsIgnoreCase("I"))
-                hasInventory = true;
-            else
-                equipmentCodesInInput.add(l.code.toUpperCase(Locale.ROOT));
+            if (l.code.equalsIgnoreCase("I")) hasInv = true;
+            else eqCodes.add(l.code.toUpperCase(Locale.ROOT));
         }
 
-        Map<String, EquipmentInventorySlot> codeToSlot = codeToSlotMap();
-        for (String c : equipmentCodesInInput)
+        Map<String, EquipmentInventorySlot> codeMap = codeToSlotMap();
+        for (String c : eqCodes)
         {
-            EquipmentInventorySlot slot = codeToSlot.get(c);
+            EquipmentInventorySlot slot = codeMap.get(c);
             if (slot != null)
             {
                 LoadoutSlot ls = equipmentSlots.get(slot);
                 if (ls != null) ls.clear();
             }
         }
-        if (hasInventory)
-        {
+        if (hasInv)
             for (LoadoutSlot s : inventorySlots) s.clear();
-        }
 
         clientThread.invoke(() -> {
             List<String> errors = new ArrayList<>();
             int invPtr = 0;
 
-            for (RepcalLine line : lines)
+            for (RepcalLine l : lines)
             {
-                if (line.code.equalsIgnoreCase("I"))
+                if (l.code.equalsIgnoreCase("I"))
                 {
-                    int itemId = resolveItemId(line.name, errors);
+                    int itemId = resolveItemId(l.name, errors);
                     if (itemId <= 0) continue;
 
-                    ItemComposition comp;
                     boolean stackable;
                     try
                     {
-                        comp = itemManager.getItemComposition(itemId);
-                        stackable = comp.isStackable() || comp.getNote() != -1;
+                        ItemComposition c = itemManager.getItemComposition(itemId);
+                        stackable = c.isStackable() || c.getNote() != -1;
                     }
                     catch (Exception ex)
                     {
-                        errors.add("Feil ved henting: " + line.name);
+                        errors.add("Failed item lookup: " + l.name);
                         continue;
                     }
 
-                    int qty = line.quantity <= 0 ? 1 : line.quantity;
+                    int qty = l.quantity <= 0 ? 1 : l.quantity;
                     if (stackable)
                     {
                         while (invPtr < inventorySlots.length && inventorySlots[invPtr].getItemId() > 0)
                             invPtr++;
                         if (invPtr >= inventorySlots.length)
                         {
-                            errors.add("Inventory full (stackable " + line.name + ")");
+                            errors.add("Inventory full (stackable " + l.name + ")");
                             continue;
                         }
-                        final int slotIndex = invPtr;
-                        invPtr++;
+                        final int slotIndex = invPtr++;
                         SwingUtilities.invokeLater(() -> inventorySlots[slotIndex].setItem(itemId, qty));
                     }
                     else
@@ -592,42 +630,37 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
                                 invPtr++;
                             if (invPtr >= inventorySlots.length)
                             {
-                                errors.add("Inventory full (" + line.name + " +" + (qty - i) + " rester)");
+                                errors.add("Inventory full (" + l.name + ")");
                                 break;
                             }
-                            final int slotIndex = invPtr;
-                            invPtr++;
+                            final int slotIndex = invPtr++;
                             SwingUtilities.invokeLater(() -> inventorySlots[slotIndex].setItem(itemId, 1));
                         }
                     }
                 }
                 else
                 {
-                    EquipmentInventorySlot slot = codeToSlot.get(line.code.toUpperCase(Locale.ROOT));
+                    EquipmentInventorySlot slot = codeMap.get(l.code.toUpperCase(Locale.ROOT));
                     if (slot == null)
                     {
-                        errors.add("Ukjent kode: " + line.code);
+                        errors.add("Unknown code: " + l.code);
                         continue;
                     }
-                    int itemId = resolveItemId(line.name, errors);
+                    int itemId = resolveItemId(l.name, errors);
                     if (itemId <= 0) continue;
-                    final LoadoutSlot ls = equipmentSlots.get(slot);
-                    if (ls == null)
-                    {
-                        errors.add("Ingen slot for: " + line.code);
-                        continue;
-                    }
-                    SwingUtilities.invokeLater(() -> ls.setItem(itemId, line.quantity <= 0 ? 1 : line.quantity));
+                    final int qty = l.quantity <= 0 ? 1 : l.quantity;
+                    SwingUtilities.invokeLater(() -> {
+                        LoadoutSlot ls = equipmentSlots.get(slot);
+                        if (ls != null) ls.setItem(itemId, qty);
+                    });
                 }
             }
 
             if (!errors.isEmpty())
             {
                 SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(
-                        this,
-                        String.join("\n", errors),
-                        "Import – problemer",
-                        JOptionPane.WARNING_MESSAGE
+                        this, String.join("\n", errors),
+                        "Import – issues", JOptionPane.WARNING_MESSAGE
                 ));
             }
         });
@@ -647,12 +680,14 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         }
         catch (JsonSyntaxException ex)
         {
-            JOptionPane.showMessageDialog(this, "Ugyldig JSON-format: " + ex.getMessage(), "JSON Import", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this, "Invalid JSON: " + ex.getMessage(),
+                    "JSON Import", JOptionPane.ERROR_MESSAGE);
             return false;
         }
         if (root == null || root.setup == null)
         {
-            JOptionPane.showMessageDialog(this, "JSON mangler 'setup'.", "JSON Import", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this, "JSON missing 'setup' object.",
+                    "JSON Import", JOptionPane.ERROR_MESSAGE);
             return false;
         }
 
@@ -687,12 +722,12 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
             }
         }
 
-        JOptionPane.showMessageDialog(this, "JSON-loadout importert.", "JSON Import", JOptionPane.INFORMATION_MESSAGE);
+        JOptionPane.showMessageDialog(this, "JSON loadout imported.",
+                "JSON Import", JOptionPane.INFORMATION_MESSAGE);
         return true;
     }
 
-    /* ===== JSON data klasser ===== */
-
+    /* ===== JSON data classes ===== */
     private static class JsonRoot { JsonSetup setup; List<Integer> layout; }
     private static class JsonSetup { List<JsonItem> inv; List<JsonItem> eq; String name; String hc; }
     private static class JsonItem { int id; @SerializedName("q") Integer q; }
@@ -714,9 +749,8 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
     {
         if (slot != EquipmentInventorySlot.WEAPON && slot != EquipmentInventorySlot.AMMO)
             return false;
+        if (!ls.isStackable() && ls.getQuantity() <= 1) return false;
         String lower = name.toLowerCase();
-        if (!ls.isStackable() && ls.getQuantity() <= 1)
-            return false;
         return lower.contains("dart") || lower.contains("knife") || lower.contains("javelin")
                 || lower.contains("throwing axe") || lower.contains("thrownaxe") || lower.contains("chinchompa")
                 || lower.contains("arrow") || lower.contains("bolt") || lower.contains("gem bolt")
@@ -768,9 +802,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         final int quantity;
         RepcalLine(String code, String name, int quantity)
         {
-            this.code = code;
-            this.name = name;
-            this.quantity = quantity;
+            this.code = code; this.name = name; this.quantity = quantity;
         }
     }
 
@@ -788,24 +820,18 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
             String code = parts[0].trim();
             String name;
             int qty = 1;
-
             if (parts.length == 2)
-            {
                 name = parts[1].trim();
-            }
             else
             {
                 name = parts[1].trim();
                 String qRaw = parts[2].trim();
-                if (qRaw.equals("*"))
-                    qty = 1;
-                else
+                if (!qRaw.equals("*"))
                 {
                     try { qty = Integer.parseInt(qRaw); }
                     catch (NumberFormatException ignored) { qty = 1; }
                 }
             }
-
             out.add(new RepcalLine(code, name, qty));
         }
         return out;
@@ -821,14 +847,13 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
     {
         if (allItemIdsCache != null || buildingIndex) return;
         buildingIndex = true;
-        int max = 40_000;
         List<Integer> tmp = new ArrayList<>(9000);
-        for (int id = 1; id < max; id++)
+        for (int id = 1; id < 40_000; id++)
         {
             try
             {
                 String nm = itemManager.getItemComposition(id).getName();
-                if (nm != null && !nm.equalsIgnoreCase("null"))
+                if (nm != null && !"null".equalsIgnoreCase(nm))
                     tmp.add(id);
             }
             catch (Exception ignored){}
@@ -849,11 +874,8 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
                 try
                 {
                     String nm = itemManager.getItemComposition(id).getName();
-                    if (nm != null && !nm.equalsIgnoreCase("null"))
-                    {
-                        String key = nm.toLowerCase();
-                        m.putIfAbsent(key, id);
-                    }
+                    if (nm != null && !"null".equalsIgnoreCase(nm))
+                        m.putIfAbsent(nm.toLowerCase(), id);
                 }
                 catch (Exception ignored){}
             }
@@ -865,17 +887,17 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
     {
         if (nameInput == null || nameInput.isEmpty())
         {
-            errors.add("Tomt navn");
+            errors.add("Empty name");
             return -1;
         }
 
         String trimmed = nameInput.trim();
         String lower = trimmed.toLowerCase();
-        boolean potionDoseHeuristic = false;
+        boolean potionHeuristic = false;
 
         if (trimmed.endsWith("("))
         {
-            potionDoseHeuristic = true;
+            potionHeuristic = true;
             trimmed = trimmed.substring(0, trimmed.length()-1);
             lower = trimmed.toLowerCase();
         }
@@ -886,12 +908,11 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         if (exact != null)
             return exact;
 
-        if (potionDoseHeuristic)
+        if (potionHeuristic)
         {
             for (int dose = 4; dose >= 1; dose--)
             {
-                String trial = trimmed + "(" + dose + ")";
-                Integer eq = exactNameMap.get(trial.toLowerCase());
+                Integer eq = exactNameMap.get((trimmed + "(" + dose + ")").toLowerCase());
                 if (eq != null) return eq;
             }
         }
@@ -909,7 +930,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
                         String nm = itemManager.getItemComposition(id).getName();
                         if (nm != null && nm.toLowerCase().startsWith(lower))
                             candidates.add(id);
-                        if (candidates.size() >= 200) break;
+                        if (candidates.size() >= 150) break;
                     }
                     catch (Exception ignored){}
                 }
@@ -918,7 +939,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
 
         if (candidates.isEmpty())
         {
-            errors.add("Fant ikke item: " + nameInput);
+            errors.add("Item not found: " + nameInput);
             return -1;
         }
 
@@ -942,15 +963,13 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
             String nmLower = nm.toLowerCase();
 
             if (nmLower.equals(lower)) score += 200;
-            if (nmLower.startsWith(lower)) score += 30;
-            if (nmLower.startsWith(lower) && nmLower.length() > lower.length()) score -= 40;
-
-            score -= Math.abs(nm.length() - nameInput.length()) * 1.5;
+            if (nmLower.startsWith(lower)) score += 40;
+            score -= Math.abs(nm.length() - nameInput.length()) * 1.2;
 
             boolean noted = comp.getNote() != -1 && comp.getLinkedNoteId() != -1;
             boolean placeholder = comp.getPlaceholderId() != -1 && comp.getPlaceholderTemplateId() != -1;
-            if (noted) score -= 25;
-            if (placeholder) score -= 25;
+            if (noted) score -= 20;
+            if (placeholder) score -= 20;
 
             if (score > bestScore)
             {
@@ -960,7 +979,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         }
 
         if (bestId <= 0)
-            errors.add("Fant ikke passende item: " + nameInput);
+            errors.add("No suitable item match: " + nameInput);
 
         return bestId;
     }
@@ -978,7 +997,8 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
                 List<Integer> list = new ArrayList<>();
                 for (Object o : (Collection<?>) res)
                 {
-                    if (o instanceof Integer) list.add((Integer) o);
+                    if (o instanceof Integer)
+                        list.add((Integer) o);
                     else if (o != null)
                     {
                         try
@@ -1006,7 +1026,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         return Collections.emptyList();
     }
 
-    /* ================= SLOT ACTION HANDLER ================= */
+    /* ================= SlotActionHandler ================= */
 
     @Override
     public void onLeftClick(LoadoutSlot slot, boolean isEquipment, int index)
@@ -1140,10 +1160,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
     {
         if (source == null || target == null || source == target) return;
         if (source.getItemId() <= 0) return;
-        if (source.isEquipment() || target.isEquipment())
-        {
-            return;
-        }
+        if (source.isEquipment() || target.isEquipment()) return;
 
         if (source.isStackable() && target.isStackable()
                 && source.getItemId() == target.getItemId())
@@ -1159,8 +1176,8 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         int tgtId = target.getItemId();
         int tgtQty = target.getQuantity();
 
-        source.setItem(tgtId, tgtQty == 0 ? 1 : tgtQty);
-        target.setItem(srcId, srcQty == 0 ? 1 : srcQty);
+        source.setItem(tgtId, tgtId > 0 ? tgtQty : 0);
+        target.setItem(srcId, srcId > 0 ? srcQty : 0);
     }
 
     /* ================= STATIC HELPERS ================= */

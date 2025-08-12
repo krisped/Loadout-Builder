@@ -20,13 +20,8 @@ import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
 
 /**
- * Loadout slot:
- *  - Mengde-menyer alltid synlig for alle items
- *  - Remove 1 / Remove all:
- *      * Hvis slot-quantity > 1: Remove 1 -> decrement; Remove all -> clear denne slotten
- *      * Hvis slot-quantity == 1 og flere identiske items finnes i andre inventory-slots:
- *          - Remove all fjerner ALLE forekomster i inventory (via panel.removeAllOccurrences)
- *          - Remove item fjerner bare denne
+ * Loadout slot.
+ * Quantity text moved to top-left (previously top-right).
  */
 public class LoadoutSlot extends JComponent
 {
@@ -37,6 +32,9 @@ public class LoadoutSlot extends JComponent
     private static final int AMOUNT_FONT_SIZE = 13;
     private static final Font AMOUNT_FONT = new Font("SansSerif", Font.BOLD, AMOUNT_FONT_SIZE);
     private static final int AMOUNT_INSET = 2;
+
+    // Toggle a subtle background behind quantity for readability
+    private static final boolean SHOW_QTY_BG = true;
 
     private final ItemManager itemManager;
     private final SlotActionHandler handler;
@@ -291,6 +289,7 @@ public class LoadoutSlot extends JComponent
             g2.drawImage(cachedIcon, x, y, null);
         }
 
+        // Quantity top-left now
         if (itemId > 0 && quantity > 1)
         {
             String txt = formatQuantity(quantity);
@@ -299,14 +298,26 @@ public class LoadoutSlot extends JComponent
             FontMetrics fm = g2.getFontMetrics();
             int textW = fm.stringWidth(txt);
             int ascent = fm.getAscent();
-            int x = getWidth() - textW - AMOUNT_INSET;
+
+            int x = AMOUNT_INSET;               // LEFT instead of right aligned
             int y = ascent + AMOUNT_INSET;
 
-            g2.setColor(Color.BLACK);
-            for (int ox = -1; ox <= 1; ox++)
-                for (int oy = -1; oy <= 1; oy++)
-                    if (!(ox == 0 && oy == 0))
-                        g2.drawString(txt, x + ox, y + oy);
+            if (SHOW_QTY_BG)
+            {
+                int bgH = fm.getHeight();
+                int bgW = textW + 4;
+                g2.setColor(new Color(0,0,0,140));
+                g2.fillRoundRect(x - 2, y - ascent - 2, bgW, bgH, 6, 6);
+            }
+            else
+            {
+                // Outline (kept if no background)
+                g2.setColor(Color.BLACK);
+                for (int ox = -1; ox <= 1; ox++)
+                    for (int oy = -1; oy <= 1; oy++)
+                        if (!(ox == 0 && oy == 0))
+                            g2.drawString(txt, x + ox, y + oy);
+            }
 
             g2.setColor(qtyColor);
             g2.drawString(txt, x, y);
@@ -358,7 +369,6 @@ public class LoadoutSlot extends JComponent
             addHeader(menu, duplicateCount);
             menu.addSeparator();
 
-            // Mengde-meny alltid
             addAddSubmenu(menu);
             addQuickSetSubmenu(menu);
 
