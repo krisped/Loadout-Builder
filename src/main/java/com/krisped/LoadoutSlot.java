@@ -20,19 +20,17 @@ import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
 
 /**
- * Loadout slot with:
- *  - Hover highlight
- *  - Stack amount overlay (custom formatting)
- *  - Context menu for modifying amounts (inventory slots)
- *  - Drag & drop between inventory slots
- *
- * Amount formatting:
- *   < 100,000        -> full number
- *   < 10,000,000     -> (value/1000) + 'K' (1,000,000 => 1000K)
- *   >= 10,000,000    -> (value/1,000,000) + 'M'
+ * Loadout slot:
+ *  - Mengde-menyer alltid synlig for alle items
+ *  - Remove 1 / Remove all:
+ *      * Hvis slot-quantity > 1: Remove 1 -> decrement; Remove all -> clear denne slotten
+ *      * Hvis slot-quantity == 1 og flere identiske items finnes i andre inventory-slots:
+ *          - Remove all fjerner ALLE forekomster i inventory (via panel.removeAllOccurrences)
+ *          - Remove item fjerner bare denne
  */
 public class LoadoutSlot extends JComponent
 {
+    private static final boolean DEBUG_MENU = false;
     private static final int SLOT_SIZE = 48;
     private static final Dimension SIZE = new Dimension(SLOT_SIZE, SLOT_SIZE);
 
@@ -50,14 +48,12 @@ public class LoadoutSlot extends JComponent
     private boolean stackable = false;
 
     private BufferedImage cachedIcon;
-    private String toolTipTextCache;
-    private String resolvedName;   // NYTT: lagre navnet separat
+    private String resolvedName;
     private boolean hover;
+    private String baseTooltip;
 
     private static boolean dragging = false;
     private static LoadoutSlot dragSource = null;
-    private static Point dragOffset = new Point(0,0);
-    private static BufferedImage dragImage = null;
     private static Cursor originalCursor = null;
 
     private final Color baseBg = ColorScheme.DARKER_GRAY_COLOR;
@@ -83,12 +79,104 @@ public class LoadoutSlot extends JComponent
         installMouse();
     }
 
+    /* ================= Public API ================= */
+
+    public void setItem(int id, int qty)
+    {
+        itemId = id;
+        quantity = Math.max(0, qty);
+        stackable = false;
+        cachedIcon = null;
+        resolvedName = null;
+        baseTooltip = null;
+
+        if (itemId > 0 && handler != null)
+            handler.requestItemInfoOnClientThread(this, itemId);
+        else
+            setToolTipText(null);
+        repaint();
+    }
+
+    public void clear()
+    {
+        itemId = -1;
+        quantity = 0;
+        stackable = false;
+        cachedIcon = null;
+        resolvedName = null;
+        baseTooltip = null;
+        setToolTipText(null);
+        repaint();
+    }
+
+    public void incrementQuantityInternal(int delta)
+    {
+        if (itemId <= 0) return;
+        quantity = Math.max(1, quantity + delta);
+        updateTooltip();
+        repaint();
+    }
+
+    public void setQuantityInternal(int newQty)
+    {
+        if (itemId <= 0) return;
+        quantity = Math.max(1, newQty);
+        updateTooltip();
+        repaint();
+    }
+
+    public void decrementQuantityInternal(int delta)
+    {
+        if (itemId <= 0) return;
+        quantity -= delta;
+        if (quantity <= 0)
+        {
+            clear();
+            return;
+        }
+        updateTooltip();
+        repaint();
+    }
+
+    public void setResolvedItemInfo(String name, BufferedImage icon, boolean stackableFlag)
+    {
+        resolvedName = name;
+        cachedIcon = icon;
+        stackable = stackableFlag;
+
+        if (quantity <= 0)
+            quantity = 1;
+
+        baseTooltip = (resolvedName != null ? resolvedName : "Item " + itemId) + " (" + itemId + ")";
+        updateTooltip();
+        repaint();
+    }
+
+    public int  getItemId()         { return itemId; }
+    public int  getQuantity()       { return quantity; }
+    public boolean isStackable()    { return stackable; }
+    public int  getSlotIndex()      { return index; }
+    public boolean isEquipment()    { return equipment; }
+    public String getResolvedName() { return resolvedName; }
+
+    private void updateTooltip()
+    {
+        if (itemId > 0)
+        {
+            String tt = baseTooltip != null ? baseTooltip : ("Item " + itemId);
+            if (quantity > 1) tt += " x" + quantity;
+            setToolTipText(tt);
+        }
+        else setToolTipText(null);
+    }
+
+    /* ================= Mouse / Drag ================= */
+
     private void installMouse()
     {
         MouseAdapter ma = new MouseAdapter()
         {
             private Point pressPoint = null;
-
             @Override public void mouseEntered(MouseEvent e){ hover = true; repaint(); }
             @Override public void mouseExited(MouseEvent e){ hover = false; repaint(); }
 
@@ -111,7 +199,7 @@ public class LoadoutSlot extends JComponent
                 if (pressPoint == null || !SwingUtilities.isLeftMouseButton(e) || itemId <= 0)
                     return;
                 if (!dragging && pressPoint.distance(e.getPoint()) > 3)
-                    startDrag(e);
+                    startDrag();
             }
 
             @Override
@@ -133,12 +221,10 @@ public class LoadoutSlot extends JComponent
         addMouseMotionListener(ma);
     }
 
-    private void startDrag(MouseEvent e)
+    private void startDrag()
     {
         dragging = true;
         dragSource = this;
-        dragOffset = e.getPoint();
-        dragImage = cachedIcon;
         var root = SwingUtilities.getRoot(this);
         if (root != null)
         {
@@ -163,10 +249,8 @@ public class LoadoutSlot extends JComponent
             if (panel != null)
                 panel.performSlotDrop(dragSource, dropTarget);
         }
-
         dragging = false;
         dragSource = null;
-        dragImage = null;
         repaint();
     }
 
@@ -178,93 +262,11 @@ public class LoadoutSlot extends JComponent
         Point rootP = new Point(screen);
         SwingUtilities.convertPointFromScreen(rootP, root);
         var c = SwingUtilities.getDeepestComponentAt(root, rootP.x, rootP.y);
-        while (c != null && !(c instanceof LoadoutSlot))
-            c = c.getParent();
+        while (c != null && !(c instanceof LoadoutSlot)) c = c.getParent();
         return (LoadoutSlot) c;
     }
 
-    /* ================= Public API ================= */
-
-    public void setItem(int id, int qty)
-    {
-        itemId = id;
-        quantity = Math.max(0, qty);
-        stackable = false;
-        cachedIcon = null;
-        toolTipTextCache = null;
-        resolvedName = null;
-
-        if (itemId > 0 && handler != null)
-            handler.requestItemInfoOnClientThread(this, itemId);
-        else
-            setToolTipText(null);
-        repaint();
-    }
-
-    public void clear()
-    {
-        itemId = -1;
-        quantity = 0;
-        stackable = false;
-        cachedIcon = null;
-        toolTipTextCache = null;
-        resolvedName = null;
-        setToolTipText(null);
-        repaint();
-    }
-
-    public void incrementQuantityInternal(int delta)
-    {
-        if (!stackable || itemId <= 0) return;
-        quantity = Math.max(1, quantity + delta);
-        updateTooltip();
-        repaint();
-    }
-
-    public void setQuantityInternal(int newQty)
-    {
-        if (!stackable || itemId <= 0) return;
-        quantity = Math.max(1, newQty);
-        updateTooltip();
-        repaint();
-    }
-
-    public void setResolvedItemInfo(String name, BufferedImage icon, boolean stackableFlag)
-    {
-        resolvedName = name;
-        toolTipTextCache = (name != null) ? name + " (" + itemId + ")" : null;
-        cachedIcon = icon;
-        stackable = stackableFlag;
-
-        if (!stackable)
-            quantity = itemId > 0 ? 1 : 0;
-        else if (quantity <= 0)
-            quantity = 1;
-
-        updateTooltip();
-        repaint();
-    }
-
-    public int  getItemId()     { return itemId; }
-    public int  getQuantity()   { return quantity; }
-    public boolean isStackable(){ return stackable; }
-    public int  getSlotIndex()  { return index; }
-    public boolean isEquipment(){ return equipment; }
-    public String getResolvedName() { return resolvedName; } // NY
-
-    private void updateTooltip()
-    {
-        if (itemId > 0)
-        {
-            String base = (toolTipTextCache != null) ? toolTipTextCache : ("Item " + itemId);
-            if (stackable && quantity > 1) base += " x" + quantity;
-            setToolTipText(base);
-        }
-        else
-            setToolTipText(null);
-    }
-
-    /* ================= Layout / Paint ================= */
+    /* ================= Painting ================= */
 
     @Override public Dimension getPreferredSize() { return SIZE; }
     @Override public Dimension getMinimumSize()   { return SIZE; }
@@ -289,16 +291,14 @@ public class LoadoutSlot extends JComponent
             g2.drawImage(cachedIcon, x, y, null);
         }
 
-        if (stackable && itemId > 0 && quantity > 1)
+        if (itemId > 0 && quantity > 1)
         {
             String txt = formatQuantity(quantity);
             Color qtyColor = chooseQuantityColor(quantity);
-
             g2.setFont(AMOUNT_FONT);
             FontMetrics fm = g2.getFontMetrics();
             int textW = fm.stringWidth(txt);
             int ascent = fm.getAscent();
-
             int x = getWidth() - textW - AMOUNT_INSET;
             int y = ascent + AMOUNT_INSET;
 
@@ -320,7 +320,6 @@ public class LoadoutSlot extends JComponent
             g2.setColor(new Color(255,255,255,40));
             g2.fillRect(0,0,getWidth(),getHeight());
         }
-
         g2.dispose();
     }
 
@@ -346,52 +345,130 @@ public class LoadoutSlot extends JComponent
 
         if (itemId <= 0)
         {
-            JMenuItem add = new JMenuItem("Set item (open search)");
-            add.addActionListener(e -> {
-                if (handler != null)
-                    handler.onLeftClick(this, equipment, index);
-            });
+            JMenuItem add = new JMenuItem("Set item...");
+            add.addActionListener(e -> { if (handler != null) handler.onLeftClick(this, equipment, index); });
             menu.add(add);
         }
         else
         {
-            if (!equipment)
-            {
-                JMenu addMenu = new JMenu("Add");
-                JMenuItem plus1 = new JMenuItem("+1");
-                JMenuItem plus5 = new JMenuItem("+5");
-                JMenuItem plus10 = new JMenuItem("+10");
-                plus1.addActionListener(e -> { if (handler != null) handler.onAddAmount(this, 1); });
-                plus5.addActionListener(e -> { if (handler != null) handler.onAddAmount(this, 5); });
-                plus10.addActionListener(e -> { if (handler != null) handler.onAddAmount(this, 10); });
-                addMenu.add(plus1);
-                addMenu.add(plus5);
-                addMenu.add(plus10);
-                menu.add(addMenu);
+            int duplicateCount = countDuplicatesInInventory();
+            boolean hasSlotQuantity = quantity > 1;
+            boolean hasExternalDuplicates = (duplicateCount > 1);
 
-                JMenuItem setAmount = new JMenuItem("Set amount...");
-                setAmount.addActionListener(e -> {
-                    String in = JOptionPane.showInputDialog(this, "Total amount:", stackable ? quantity : 1);
-                    if (in != null)
+            addHeader(menu, duplicateCount);
+            menu.addSeparator();
+
+            // Mengde-meny alltid
+            addAddSubmenu(menu);
+            addQuickSetSubmenu(menu);
+
+            JMenuItem setAmount = new JMenuItem("Set amount...");
+            setAmount.addActionListener(e -> {
+                String in = JOptionPane.showInputDialog(this, "Total amount:", Math.max(1, quantity));
+                if (in != null)
+                {
+                    try
                     {
-                        try
-                        {
-                            int val = Integer.parseInt(in.trim());
-                            if (val > 0 && handler != null)
-                                handler.onSetTotalAmount(this, val);
-                        }
-                        catch (NumberFormatException ignored) {}
+                        int val = Integer.parseInt(in.trim());
+                        if (val > 0 && handler != null)
+                            handler.onSetTotalAmount(this, val);
                     }
-                });
-                menu.add(setAmount);
-                menu.addSeparator();
+                    catch (NumberFormatException ignored) {}
+                }
+            });
+            menu.add(setAmount);
+            menu.addSeparator();
+
+            if (hasSlotQuantity)
+            {
+                JMenuItem removeOne = new JMenuItem("Remove 1");
+                removeOne.addActionListener(e -> decrementQuantityInternal(1));
+                menu.add(removeOne);
+
+                JMenuItem removeAllThisStack = new JMenuItem("Remove all");
+                removeAllThisStack.addActionListener(e -> clear());
+                menu.add(removeAllThisStack);
+            }
+            else
+            {
+                if (hasExternalDuplicates && !equipment)
+                {
+                    JMenuItem removeAllDup = new JMenuItem("Remove all");
+                    removeAllDup.addActionListener(e -> {
+                        LoadoutBuilderPanel panel = LoadoutBuilderPanel.findPanel(this);
+                        if (panel != null)
+                            panel.removeAllOccurrences(itemId);
+                    });
+                    menu.add(removeAllDup);
+                }
+                JMenuItem removeSingle = new JMenuItem("Remove item");
+                removeSingle.addActionListener(e -> clear());
+                menu.add(removeSingle);
             }
 
-            JMenuItem remove = new JMenuItem("Remove item");
-            remove.addActionListener(e -> clear());
-            menu.add(remove);
+            menu.addSeparator();
+
+            JMenuItem change = new JMenuItem("Change item...");
+            change.addActionListener(e -> { if (handler != null) handler.onLeftClick(this, equipment, index); });
+            menu.add(change);
         }
 
         menu.show(this, x, y);
+    }
+
+    private void addHeader(JPopupMenu menu, int duplicateCount)
+    {
+        String headerTxt = (resolvedName != null ? resolvedName : ("Item " + itemId)) + " (" + itemId + ")";
+        if (quantity > 1) headerTxt += " x" + quantity;
+        else if (duplicateCount > 1) headerTxt += " (" + duplicateCount + " slots)";
+        if (DEBUG_MENU) headerTxt += " [eq=" + equipment + " st=" + stackable + "]";
+        JMenuItem header = new JMenuItem(headerTxt);
+        header.setEnabled(false);
+        menu.add(header);
+    }
+
+    private int countDuplicatesInInventory()
+    {
+        LoadoutBuilderPanel panel = LoadoutBuilderPanel.findPanel(this);
+        if (panel == null) return 1;
+        int count = 0;
+        for (LoadoutSlot s : panel.getInventorySlots())
+        {
+            if (s.getItemId() == itemId)
+                count++;
+        }
+        return Math.max(count, 1);
+    }
+
+    private void addAddSubmenu(JPopupMenu menu)
+    {
+        JMenu addMenu = new JMenu("Add");
+        int[] deltas = {1,5,10,25,50,100};
+        for (int d : deltas)
+        {
+            JMenuItem mi = new JMenuItem("+" + d);
+            mi.addActionListener(e -> {
+                if (handler != null)
+                    handler.onAddAmount(this, d);
+            });
+            addMenu.add(mi);
+        }
+        menu.add(addMenu);
+    }
+
+    private void addQuickSetSubmenu(JPopupMenu menu)
+    {
+        JMenu preset = new JMenu("Set quick");
+        int[] values = {10,25,50,100,250,1000,5000,10000};
+        for (int v : values)
+        {
+            JMenuItem mi = new JMenuItem(Integer.toString(v));
+            mi.addActionListener(e -> {
+                if (handler != null)
+                    handler.onSetTotalAmount(this, v);
+            });
+            preset.add(mi);
+        }
+        menu.add(preset);
     }
 }

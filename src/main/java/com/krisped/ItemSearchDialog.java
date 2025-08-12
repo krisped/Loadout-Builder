@@ -35,6 +35,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Item search dialog med klassifisering (Normal / Noted / Placeholder) vist som separate flagg.
+ * Oppdatert: Default sortering settes til ID Low-High (ID_ASC) ved åpning.
  */
 public class ItemSearchDialog extends JDialog
 {
@@ -79,6 +80,8 @@ public class ItemSearchDialog extends JDialog
         this.clientThread = clientThread;
         buildUI();
         attach();
+        // Default sortering: ID Low-High
+        sortCombo.setSelectedItem(SortMode.ID_ASC);
         setPreferredSize(new Dimension(650, 670));
         pack();
         SwingUtilities.invokeLater(() -> searchField.requestFocusInWindow());
@@ -333,7 +336,6 @@ public class ItemSearchDialog extends JDialog
                 BufferedImage img = itemManager.getImage(id);
                 List<String> actions = extractActions(comp);
 
-                // Display string (list): Name (ID)
                 String listDisplay = name + " (" + id + ")";
                 out.add(new Result(id, name, listDisplay, img, stackable, isNoted, isPlaceholder, isNormal, members, duplicator, actions));
             }
@@ -341,6 +343,7 @@ public class ItemSearchDialog extends JDialog
             if (out.size() >= 500) break;
         }
 
+        // Sortering (default: ID_ASC fordi combo settes til ID_ASC i konstruktør)
         sortResults(out);
         return out;
     }
@@ -348,15 +351,15 @@ public class ItemSearchDialog extends JDialog
     private void sortResults(List<Result> list)
     {
         SortMode mode = (SortMode) sortCombo.getSelectedItem();
-        if (mode == null) mode = SortMode.NAME_ASC;
+        if (mode == null) mode = SortMode.ID_ASC;
         Comparator<Result> cmp;
         switch (mode)
         {
             case NAME_DESC: cmp = Comparator.comparing((Result r) -> r.listDisplay.toLowerCase()).reversed(); break;
             case ID_ASC: cmp = Comparator.comparingInt(r -> r.itemId); break;
             case ID_DESC: cmp = Comparator.comparingInt((Result r) -> r.itemId).reversed(); break;
-            case NAME_ASC:
-            default: cmp = Comparator.comparing((Result r) -> r.listDisplay.toLowerCase()); break;
+            case NAME_ASC: cmp = Comparator.comparing((Result r) -> r.listDisplay.toLowerCase()); break;
+            default: cmp = Comparator.comparingInt(r -> r.itemId); break;
         }
         list.sort(cmp);
     }
@@ -493,8 +496,8 @@ public class ItemSearchDialog extends JDialog
         }
 
         StringBuilder sb = new StringBuilder();
-        sb.append(r.itemName).append('\n');              // Navn
-        sb.append("ID         : ").append(r.itemId).append('\n'); // Egen ID-linje
+        sb.append(r.itemName).append('\n');
+        sb.append("ID         : ").append(r.itemId).append('\n');
         sb.append("Normal     : ").append(r.normal ? "Yes" : "No").append('\n');
         sb.append("Noted      : ").append(r.noted ? "Yes" : "No").append('\n');
         sb.append("Placeholder: ").append(r.placeholder ? "Yes" : "No").append('\n');
@@ -515,8 +518,8 @@ public class ItemSearchDialog extends JDialog
     private static class Result
     {
         final int itemId;
-        final String itemName;   // nytt: bare navnet
-        final String listDisplay; // teksten i lista (Name (ID) eller status)
+        final String itemName;
+        final String listDisplay;
         final BufferedImage icon;
         final boolean stackable;
         final boolean noted;
