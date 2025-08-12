@@ -51,6 +51,7 @@ public class LoadoutSlot extends JComponent
 
     private BufferedImage cachedIcon;
     private String toolTipTextCache;
+    private String resolvedName;   // NYTT: lagre navnet separat
     private boolean hover;
 
     private static boolean dragging = false;
@@ -191,6 +192,7 @@ public class LoadoutSlot extends JComponent
         stackable = false;
         cachedIcon = null;
         toolTipTextCache = null;
+        resolvedName = null;
 
         if (itemId > 0 && handler != null)
             handler.requestItemInfoOnClientThread(this, itemId);
@@ -206,6 +208,7 @@ public class LoadoutSlot extends JComponent
         stackable = false;
         cachedIcon = null;
         toolTipTextCache = null;
+        resolvedName = null;
         setToolTipText(null);
         repaint();
     }
@@ -228,6 +231,7 @@ public class LoadoutSlot extends JComponent
 
     public void setResolvedItemInfo(String name, BufferedImage icon, boolean stackableFlag)
     {
+        resolvedName = name;
         toolTipTextCache = (name != null) ? name + " (" + itemId + ")" : null;
         cachedIcon = icon;
         stackable = stackableFlag;
@@ -246,6 +250,7 @@ public class LoadoutSlot extends JComponent
     public boolean isStackable(){ return stackable; }
     public int  getSlotIndex()  { return index; }
     public boolean isEquipment(){ return equipment; }
+    public String getResolvedName() { return resolvedName; } // NY
 
     private void updateTooltip()
     {
