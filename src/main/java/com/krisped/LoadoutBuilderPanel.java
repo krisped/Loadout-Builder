@@ -34,16 +34,18 @@ import java.util.List;
  * Panel for building a loadout: equipment + inventory,
  * Repcal/KittyKeys eksport, import og clipboard export.
  *
- * Utvidet: Import av JSON-format:
- * {
- *   "setup":{
- *     "inv":[ {"id":385}, {"id":385}, ... 28 slots ... ],
- *     "eq":[ {"id":1153}, {"id":6568}, ... 14 slots ... ],
- *     "name":"test",
- *     "hc":"#FFFF0000"
- *   },
- *   "layout":[ ... ]   // Ignoreres per nå
- * }
+ * JSON-import støttes.
+ * KittyKeys:
+ *  - WITHDRAW bruker sanitert navn
+ *  - BANK_EQUIP bruker samme sanitert navn
+ *
+ * Sanitizing-krav (oppdatert):
+ *  - Ikke uppercase (returner lowercase)
+ *  - Behold eksisterende parenteser (ikke fjern dem, ikke legg til nye)
+ *  - Sett inn en underscore før '(' hvis den følger umiddelbart etter et ordtegn (f.eks. glory(5) -> glory_(5))
+ *  - Fjern/erstat tegn som ikke er [A-Za-z0-9() ] med mellomrom
+ *  - Kollaps flere mellomrom/underscores til en enkelt underscore
+ *  - Trim undersores i start/slutt
  */
 public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.SlotActionHandler
 {
@@ -360,7 +362,9 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
                 if (ls == null || ls.getItemId() <= 0) continue;
                 String name = resolveName(ls);
                 String code = equipmentCode(slot);
-                String qtyString = isWeaponOrAmmoWildcard(slot, ls, name) ? "*" : Integer.toString(Math.max(1, ls.getQuantity()));
+                String qtyString = isWeaponOrAmmoWildcard(slot, ls, name)
+                        ? "*"
+                        : Integer.toString(Math.max(1, ls.getQuantity()));
                 sb.append(code).append(":").append(name).append(":").append(qtyString).append("\n");
             }
 
@@ -404,7 +408,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
                     EquipmentInventorySlot.AMMO
             };
 
-            // Bevarer rekkefølgen og lagrer sanitized navn per slot
+            // Lagre sanitized navn i innsettingsrekkefølge
             LinkedHashMap<EquipmentInventorySlot, String> sanitizedNames = new LinkedHashMap<>();
 
             for (EquipmentInventorySlot slot : order)
@@ -414,14 +418,15 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
                 {
                     String rawName = resolveName(ls);
                     String sanitized = kittyKeysItemName(rawName);
-                    String qty = isWeaponOrAmmoWildcard(slot, ls, rawName) ? "*" : Integer.toString(Math.max(1, ls.getQuantity()));
+                    String qty = isWeaponOrAmmoWildcard(slot, ls, rawName)
+                            ? "*"
+                            : Integer.toString(Math.max(1, ls.getQuantity()));
                     sb.append("WITHDRAW ").append(sanitized).append(" ").append(qty).append("\n");
                     sanitizedNames.put(slot, sanitized);
                 }
             }
             if (!sanitizedNames.isEmpty()) sb.append("\n");
 
-            // ENDRING: BANK_EQUIP bruker sanitized item-navn, ikke slot token
             for (String sanitized : sanitizedNames.values())
             {
                 sb.append("BANK_EQUIP ").append(sanitized).append("\n");
@@ -447,14 +452,44 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         });
     }
 
+    /**
+     * KittyKeys navn-sanitering (oppdatert krav):
+     * - Behold parenteser som finnes i originalen.
+     * - Ikke legg til parenteser som ikke finnes.
+     * - Sett inn underscore før '(' hvis den kommer direkte etter et ordtegn (bokstav/tall) eller apostrof.
+     * - Tillat kun [a-z0-9() ] i mellom-steg (behold parenteser), andre tegn -> mellomrom.
+     * - Konverter til lowercase (ikke uppercase).
+     * - Mellomrom -> underscore, kollaps flere underscores.
+     * - Fjern leading/trailing underscores.
+     */
     private String kittyKeysItemName(String name)
     {
         if (name == null) return "";
-        return name.toLowerCase()
-                .replace("’","'")
-                .replaceAll("[^a-z0-9 ]", " ")
-                .trim()
-                .replaceAll("\\s+", "_");
+        String out = name;
+
+        // Normaliser fancy apostrof
+        out = out.replace("’", "'");
+
+        // Sett inn underscore før '(' hvis det ikke allerede er mellomrom/underscore før
+        // Eksempel: "glory(5)" -> "glory_(5)"
+        out = out.replaceAll("(?<![\\s_])\\(", "_(");
+
+        // Tillat kun bokstaver, tall, parenteser og space midlertidig
+        out = out.replaceAll("[^A-Za-z0-9() ]", " ");
+
+        // Trim og collapse spaces til én underscore
+        out = out.trim().replaceAll("\\s+", "_");
+
+        // Kollaps flere underscores
+        out = out.replaceAll("_+", "_");
+
+        // Fjern leading/trailing underscore
+        out = out.replaceAll("^_+", "").replaceAll("_+$", "");
+
+        // Lowercase (krav: ikke uppercase)
+        out = out.toLowerCase(Locale.ROOT);
+
+        return out;
     }
 
     /* ================= IMPORT (Repcal + JSON autodetect) ================= */
@@ -472,7 +507,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         if (looksLikeJsonLoadout(trimmed))
         {
             if (importJsonLoadout(trimmed))
-                return; // Lyktes med JSON, avslutt.
+                return; // JSON OK -> ferdig
         }
 
         List<RepcalLine> lines = parseRepcalLines(text);
@@ -617,10 +652,8 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
             return false;
         }
 
-        // Clear alt
         resetAll();
 
-        // Inventory
         if (root.setup.inv != null)
         {
             for (int i = 0; i < Math.min(28, root.setup.inv.size()); i++)
@@ -632,7 +665,6 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
             }
         }
 
-        // Equipment
         if (root.setup.eq != null)
         {
             int len = Math.min(root.setup.eq.size(), EQ_INDEX_MAP.length);
@@ -641,7 +673,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
                 JsonItem ji = root.setup.eq.get(i);
                 if (ji == null || ji.id <= 0) continue;
                 EquipmentInventorySlot slot = EQ_INDEX_MAP[i];
-                if (slot == null) continue; // placeholder posisjon
+                if (slot == null) continue;
                 LoadoutSlot ls = equipmentSlots.get(slot);
                 if (ls != null)
                 {
