@@ -34,18 +34,17 @@ import java.util.List;
  * Panel for building a loadout: equipment + inventory,
  * Repcal/KittyKeys eksport, import og clipboard export.
  *
- * JSON-import støttes.
  * KittyKeys:
- *  - WITHDRAW bruker sanitert navn
- *  - BANK_EQUIP bruker samme sanitert navn
+ *  - WITHDRAW <sanitert>
+ *  - BANK_WIELD <samme sanitize>
  *
- * Sanitizing-krav (oppdatert):
- *  - Ikke uppercase (returner lowercase)
- *  - Behold eksisterende parenteser (ikke fjern dem, ikke legg til nye)
- *  - Sett inn en underscore før '(' hvis den følger umiddelbart etter et ordtegn (f.eks. glory(5) -> glory_(5))
- *  - Fjern/erstat tegn som ikke er [A-Za-z0-9() ] med mellomrom
- *  - Kollaps flere mellomrom/underscores til en enkelt underscore
- *  - Trim undersores i start/slutt
+ * JSON-import støttes (innliming i tekstfelt + Import).
+ *
+ * Sanitizing-krav:
+ *  - Lowercase (ikke uppercase)
+ *  - Behold eksisterende parenteser
+ *  - Sett inn underscore før '(' hvis den kommer direkte etter et ordtegn
+ *  - Fjern andre tegn -> space, normaliser til underscore
  */
 public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.SlotActionHandler
 {
@@ -75,8 +74,9 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
 
     private final Gson gson = new Gson();
 
+    private JPanel contentPanel;
+
     // Mapping av eq-array index til faktiske slots (null = placeholder/hopp over)
-    // Korrigert: index 9 = GLOVES, index 10 = BOOTS
     private static final EquipmentInventorySlot[] EQ_INDEX_MAP = new EquipmentInventorySlot[]{
             EquipmentInventorySlot.HEAD,   // 0
             EquipmentInventorySlot.CAPE,   // 1
@@ -103,19 +103,31 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         buildUI();
     }
 
-    /* ================= UI BUILD ================= */
+    /* ================= UI BUILD (scrollable) ================= */
 
     private void buildUI()
     {
-        setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
-        setBackground(ColorScheme.DARK_GRAY_COLOR);
+        setLayout(new BorderLayout());
+
+        contentPanel = new JPanel();
+        contentPanel.setLayout(new BoxLayout(contentPanel, BoxLayout.Y_AXIS));
+        contentPanel.setBackground(ColorScheme.DARK_GRAY_COLOR);
 
         buildEquipmentPanel();
-        add(Box.createVerticalStrut(10));
+        contentPanel.add(Box.createVerticalStrut(10));
         buildInventoryPanel();
-        add(Box.createVerticalStrut(10));
+        contentPanel.add(Box.createVerticalStrut(10));
         buildLoadoutSection();
-        add(Box.createVerticalGlue());
+        contentPanel.add(Box.createVerticalGlue());
+
+        JScrollPane scroll = new JScrollPane(contentPanel,
+                JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED,
+                JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        scroll.setBorder(null);
+        scroll.getVerticalScrollBar().setUnitIncrement(16);
+        scroll.getViewport().setBackground(ColorScheme.DARK_GRAY_COLOR);
+
+        add(scroll, BorderLayout.CENTER);
     }
 
     private void buildEquipmentPanel()
@@ -163,7 +175,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         buttonRow.add(resetButton);
         wrapper.add(buttonRow, BorderLayout.SOUTH);
 
-        add(wrapper);
+        contentPanel.add(wrapper);
     }
 
     private void addEquipCell(EquipmentInventorySlot slot, String labelText)
@@ -216,7 +228,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         }
 
         wrapper.add(inventoryPanel, BorderLayout.CENTER);
-        add(wrapper);
+        contentPanel.add(wrapper);
     }
 
     private void buildLoadoutSection()
@@ -254,7 +266,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         buttonsGrid.add(exportButton);
 
         wrapper.add(buttonsGrid, BorderLayout.SOUTH);
-        add(wrapper);
+        contentPanel.add(wrapper);
     }
 
     /* ================= BASIC ACTIONS ================= */
@@ -387,7 +399,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         });
     }
 
-    /* ================= KITTYKEYS EXPORT ================= */
+    /* ================= KITTYKEYS EXPORT (BANK_WIELD) ================= */
 
     private void generateKittyKeysScript()
     {
@@ -408,7 +420,6 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
                     EquipmentInventorySlot.AMMO
             };
 
-            // Lagre sanitized navn i innsettingsrekkefølge
             LinkedHashMap<EquipmentInventorySlot, String> sanitizedNames = new LinkedHashMap<>();
 
             for (EquipmentInventorySlot slot : order)
@@ -427,9 +438,10 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
             }
             if (!sanitizedNames.isEmpty()) sb.append("\n");
 
+            // Endret: BANK_WIELD
             for (String sanitized : sanitizedNames.values())
             {
-                sb.append("BANK_EQUIP ").append(sanitized).append("\n");
+                sb.append("BANK_WIELD ").append(sanitized).append("\n");
             }
             if (!sanitizedNames.isEmpty()) sb.append("\n");
 
@@ -453,42 +465,34 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
     }
 
     /**
-     * KittyKeys navn-sanitering (oppdatert krav):
-     * - Behold parenteser som finnes i originalen.
-     * - Ikke legg til parenteser som ikke finnes.
-     * - Sett inn underscore før '(' hvis den kommer direkte etter et ordtegn (bokstav/tall) eller apostrof.
-     * - Tillat kun [a-z0-9() ] i mellom-steg (behold parenteser), andre tegn -> mellomrom.
-     * - Konverter til lowercase (ikke uppercase).
-     * - Mellomrom -> underscore, kollaps flere underscores.
-     * - Fjern leading/trailing underscores.
+     * KittyKeys navn-sanitering:
+     * - Behold parenteser (ikke fjern, ikke legg til).
+     * - Underscore før '(' hvis den følger rett etter ordtegn/apostrof.
+     * - Fjern andre spesialtegn -> space.
+     * - Kollaps spaces -> underscore, kollaps flere underscores.
+     * - Trim underscores i start/slutt.
+     * - Lowercase.
      */
     private String kittyKeysItemName(String name)
     {
         if (name == null) return "";
         String out = name;
-
-        // Normaliser fancy apostrof
         out = out.replace("’", "'");
 
-        // Sett inn underscore før '(' hvis det ikke allerede er mellomrom/underscore før
-        // Eksempel: "glory(5)" -> "glory_(5)"
+        // Legg til underscore før '(' hvis direkte etter ordtegn/ apostrof og ikke allerede space/underscore
         out = out.replaceAll("(?<![\\s_])\\(", "_(");
 
-        // Tillat kun bokstaver, tall, parenteser og space midlertidig
+        // Tillat bokstaver/tall/space/() – andre tegn til space
         out = out.replaceAll("[^A-Za-z0-9() ]", " ");
 
-        // Trim og collapse spaces til én underscore
+        // Trim -> spaces til underscore
         out = out.trim().replaceAll("\\s+", "_");
-
         // Kollaps flere underscores
         out = out.replaceAll("_+", "_");
-
         // Fjern leading/trailing underscore
         out = out.replaceAll("^_+", "").replaceAll("_+$", "");
-
-        // Lowercase (krav: ikke uppercase)
+        // Lowercase
         out = out.toLowerCase(Locale.ROOT);
-
         return out;
     }
 
@@ -507,7 +511,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         if (looksLikeJsonLoadout(trimmed))
         {
             if (importJsonLoadout(trimmed))
-                return; // JSON OK -> ferdig
+                return;
         }
 
         List<RepcalLine> lines = parseRepcalLines(text);
@@ -689,24 +693,9 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
 
     /* ===== JSON data klasser ===== */
 
-    private static class JsonRoot
-    {
-        JsonSetup setup;
-        List<Integer> layout; // Ignoreres nå
-    }
-    private static class JsonSetup
-    {
-        List<JsonItem> inv;
-        List<JsonItem> eq;
-        String name;
-        String hc;
-    }
-    private static class JsonItem
-    {
-        int id;
-        @SerializedName("q")
-        Integer q;
-    }
+    private static class JsonRoot { JsonSetup setup; List<Integer> layout; }
+    private static class JsonSetup { List<JsonItem> inv; List<JsonItem> eq; String name; String hc; }
+    private static class JsonItem { int id; @SerializedName("q") Integer q; }
 
     /* ================= HELPERS ================= */
 
@@ -732,25 +721,6 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
                 || lower.contains("throwing axe") || lower.contains("thrownaxe") || lower.contains("chinchompa")
                 || lower.contains("arrow") || lower.contains("bolt") || lower.contains("gem bolt")
                 || lower.contains("bolt rack") || lower.contains("brutal") || lower.contains("cannonball");
-    }
-
-    private String equipmentSlotToken(EquipmentInventorySlot slot)
-    {
-        switch (slot)
-        {
-            case HEAD: return "HELM";
-            case CAPE: return "CAPE";
-            case AMULET: return "AMULET";
-            case WEAPON: return "WEAPON";
-            case BODY: return "BODY";
-            case SHIELD: return "SHIELD";
-            case LEGS: return "LEGS";
-            case GLOVES: return "GLOVES";
-            case BOOTS: return "BOOTS";
-            case RING: return "RING";
-            case AMMO: return "AMMO";
-            default: return slot.name();
-        }
     }
 
     private String equipmentCode(EquipmentInventorySlot slot)
@@ -1008,8 +978,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
                 List<Integer> list = new ArrayList<>();
                 for (Object o : (Collection<?>) res)
                 {
-                    if (o instanceof Integer)
-                        list.add((Integer) o);
+                    if (o instanceof Integer) list.add((Integer) o);
                     else if (o != null)
                     {
                         try
