@@ -1,0 +1,660 @@
+package com.krisped;
+
+import net.runelite.api.ItemComposition;
+import net.runelite.client.callback.ClientThread;
+import net.runelite.client.game.ItemManager;
+
+import javax.swing.*;
+import java.awt.BorderLayout;
+import java.awt.Color;
+import java.awt.Component;
+import java.awt.Dimension;
+import java.awt.FlowLayout;
+import java.awt.Font;
+import java.awt.Frame;
+import java.awt.Graphics;
+import java.awt.Graphics2D;
+import java.awt.Image;
+import java.awt.Insets;
+import java.awt.RenderingHints;
+import java.awt.event.KeyAdapter;
+import java.awt.event.KeyEvent;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.awt.event.MouseMotionAdapter;
+import java.awt.image.BufferedImage;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.Collections;
+import java.util.concurrent.atomic.AtomicInteger;
+
+/**
+ * Item search dialog med klassifisering (Normal / Noted / Placeholder) vist som separate flagg.
+ */
+public class ItemSearchDialog extends JDialog
+{
+    private static final float LIST_MAIN_FONT_SIZE = 16f;
+    private static final float LIST_META_FONT_SIZE = 15f;
+    private static final float DETAIL_FONT_SIZE    = 16f;
+    private static final String FONT_FAMILY = "SansSerif";
+
+    private final ItemManager itemManager;
+    private final ClientThread clientThread;
+
+    private final JTextField searchField = new JTextField();
+    private final JComboBox<SortMode> sortCombo = new JComboBox<>(SortMode.values());
+    private final DefaultListModel<Result> listModel = new DefaultListModel<>();
+    private final JList<Result> resultList = new JList<>(listModel);
+    private final JButton okBtn = new JButton("Select");
+    private final JButton cancelBtn = new JButton("Cancel");
+    private final JLabel statusLabel = new JLabel(" ");
+    private final AATextArea detailArea = new AATextArea();
+    private final JLabel largeIconLabel = new JLabel();
+
+    private int selectedItemId = -1;
+
+    private volatile List<Integer> allItemIdsCache = null;
+    private volatile boolean buildingIndex = false;
+    private final AtomicInteger searchGeneration = new AtomicInteger();
+    private int hoverIndex = -1;
+
+    public static int showDialog(Component parent, ItemManager itemManager, ClientThread clientThread)
+    {
+        Frame f = JOptionPane.getFrameForComponent(parent);
+        ItemSearchDialog d = new ItemSearchDialog(f, itemManager, clientThread);
+        d.setLocationRelativeTo(parent);
+        d.setVisible(true);
+        return d.selectedItemId;
+    }
+
+    private ItemSearchDialog(Frame owner, ItemManager itemManager, ClientThread clientThread)
+    {
+        super(owner, "Item Search", true);
+        this.itemManager = itemManager;
+        this.clientThread = clientThread;
+        buildUI();
+        attach();
+        setPreferredSize(new Dimension(650, 670));
+        pack();
+        SwingUtilities.invokeLater(() -> searchField.requestFocusInWindow());
+    }
+
+    private void buildUI()
+    {
+        setLayout(new BorderLayout(8,8));
+
+        JPanel top = new JPanel(new BorderLayout(6,4));
+        top.setBorder(BorderFactory.createEmptyBorder(8,8,0,8));
+
+        JLabel lbl = new JLabel("Search (name or ID) and press Enter (e.g: Dragon scimitar)");
+        lbl.setFont(new Font(FONT_FAMILY, Font.PLAIN, (int) LIST_MAIN_FONT_SIZE));
+        top.add(lbl, BorderLayout.NORTH);
+
+        JPanel searchLine = new JPanel(new BorderLayout(6,0));
+        searchField.setFont(new Font(FONT_FAMILY, Font.PLAIN, 15));
+        searchField.setMargin(new Insets(3,6,3,6));
+        sortCombo.setFont(new Font(FONT_FAMILY, Font.PLAIN, 14));
+        sortCombo.setFocusable(false);
+        sortCombo.setToolTipText("Change sorting order of results");
+
+        searchLine.add(searchField, BorderLayout.CENTER);
+        searchLine.add(sortCombo, BorderLayout.EAST);
+        top.add(searchLine, BorderLayout.CENTER);
+        add(top, BorderLayout.NORTH);
+
+        JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT);
+        split.setResizeWeight(0.55);
+
+        resultList.setCellRenderer(new Renderer());
+        resultList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        JScrollPane listScroll = new JScrollPane(resultList);
+        listScroll.getViewport().setBackground(UIManager.getColor("Panel.background"));
+        split.setLeftComponent(listScroll);
+
+        JPanel detailPanel = new JPanel(new BorderLayout(6,6));
+        detailPanel.setBorder(BorderFactory.createTitledBorder("Details"));
+        detailPanel.setOpaque(true);
+
+        JPanel iconPanel = new JPanel(new BorderLayout());
+        iconPanel.setOpaque(false);
+        largeIconLabel.setHorizontalAlignment(SwingConstants.CENTER);
+        largeIconLabel.setPreferredSize(new Dimension(72, 72));
+        iconPanel.add(largeIconLabel, BorderLayout.NORTH);
+        detailPanel.add(iconPanel, BorderLayout.NORTH);
+
+        detailArea.setEditable(false);
+        detailArea.setFont(new Font(FONT_FAMILY, Font.PLAIN, (int) DETAIL_FONT_SIZE));
+        detailArea.setOpaque(true);
+        detailArea.setBackground(UIManager.getColor("Panel.background"));
+        detailArea.setLineWrap(true);
+        detailArea.setWrapStyleWord(true);
+        detailArea.setBorder(BorderFactory.createEmptyBorder(8,8,8,8));
+        JScrollPane detailScroll = new JScrollPane(detailArea);
+        detailScroll.setBorder(BorderFactory.createEmptyBorder());
+        detailScroll.getViewport().setBackground(UIManager.getColor("Panel.background"));
+        detailPanel.add(detailScroll, BorderLayout.CENTER);
+
+        split.setRightComponent(detailPanel);
+        add(split, BorderLayout.CENTER);
+
+        JPanel bottom = new JPanel(new BorderLayout());
+        bottom.setBorder(BorderFactory.createEmptyBorder(0,8,8,8));
+        JPanel btns = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        okBtn.setFont(new Font(FONT_FAMILY, Font.PLAIN, (int) LIST_MAIN_FONT_SIZE));
+        cancelBtn.setFont(new Font(FONT_FAMILY, Font.PLAIN, (int) LIST_MAIN_FONT_SIZE));
+        statusLabel.setFont(new Font(FONT_FAMILY, Font.PLAIN, (int) LIST_META_FONT_SIZE));
+        btns.add(okBtn);
+        btns.add(cancelBtn);
+        okBtn.setEnabled(false);
+        bottom.add(statusLabel, BorderLayout.WEST);
+        bottom.add(btns, BorderLayout.EAST);
+        add(bottom, BorderLayout.SOUTH);
+    }
+
+    private void attach()
+    {
+        searchField.addKeyListener(new KeyAdapter()
+        {
+            @Override public void keyPressed(KeyEvent e)
+            {
+                if (e.getKeyCode() == KeyEvent.VK_ENTER) startSearch();
+            }
+        });
+
+        resultList.addListSelectionListener(e -> {
+            if (e.getValueIsAdjusting()) return;
+            Result r = resultList.getSelectedValue();
+            okBtn.setEnabled(r != null && r.itemId > 0);
+            updateDetails(r);
+        });
+
+        resultList.addMouseListener(new MouseAdapter()
+        {
+            @Override public void mouseClicked(MouseEvent e)
+            {
+                if (e.getClickCount() == 2) accept();
+            }
+            @Override public void mouseExited(MouseEvent e)
+            {
+                if (hoverIndex != -1)
+                {
+                    hoverIndex = -1;
+                    resultList.repaint();
+                }
+            }
+        });
+
+        resultList.addMouseMotionListener(new MouseMotionAdapter()
+        {
+            @Override public void mouseMoved(MouseEvent e)
+            {
+                int idx = resultList.locationToIndex(e.getPoint());
+                if (idx != hoverIndex)
+                {
+                    hoverIndex = idx;
+                    resultList.repaint();
+                }
+            }
+        });
+
+        sortCombo.addActionListener(e -> resortCurrentResults());
+
+        okBtn.addActionListener(e -> accept());
+        cancelBtn.addActionListener(e -> { selectedItemId = -1; dispose(); });
+
+        getRootPane().setDefaultButton(okBtn);
+    }
+
+    private void accept()
+    {
+        Result r = resultList.getSelectedValue();
+        if (r != null && r.itemId > 0)
+        {
+            selectedItemId = r.itemId;
+            dispose();
+        }
+    }
+
+    /* ================= Search & Sorting ================= */
+
+    private void startSearch()
+    {
+        final String raw = searchField.getText().trim();
+        listModel.clear();
+        okBtn.setEnabled(false);
+        updateDetails(null);
+
+        if (raw.isEmpty())
+        {
+            status("Empty search.");
+            return;
+        }
+
+        final int gen = searchGeneration.incrementAndGet();
+        status("Searching...");
+        listModel.addElement(new Result(-1, null,"(Searching...)", null,false,false,false,false,false,false, Collections.emptyList()));
+
+        clientThread.invoke(() -> {
+            List<Result> results;
+            try { results = performSearchOnClientThread(raw); }
+            catch (Exception ex)
+            {
+                results = Collections.singletonList(
+                        new Result(-1, null,"Error: " + ex.getMessage(), null,false,false,false,false,false,false, Collections.emptyList())
+                );
+            }
+            final List<Result> publish = results;
+            SwingUtilities.invokeLater(() -> {
+                if (gen != searchGeneration.get()) return;
+                listModel.clear();
+                for (Result r : publish) listModel.addElement(r);
+                if (listModel.isEmpty())
+                    listModel.addElement(new Result(-1, null,"No matches.", null,false,false,false,false,false,false, Collections.emptyList()));
+                status(publish.size() + " result(s)");
+                if (!listModel.isEmpty()) resultList.setSelectedIndex(0);
+            });
+        });
+    }
+
+    private List<Result> performSearchOnClientThread(String raw)
+    {
+        String[] tokens = java.util.Arrays.stream(raw.toLowerCase().split("\\s+"))
+                .map(t -> t.replace("*","").trim())
+                .filter(t -> !t.isEmpty())
+                .toArray(String[]::new);
+
+        Set<Integer> ids = new LinkedHashSet<>();
+
+        if (tokens.length == 1)
+        {
+            try { ids.add(Integer.parseInt(tokens[0])); }
+            catch (NumberFormatException ignored){}
+        }
+
+        List<Integer> searchRes = invokeItemManagerSearch(String.join(" ", tokens));
+        ids.addAll(searchRes);
+
+        ensureIndex();
+
+        if (allItemIdsCache != null)
+        {
+            for (Integer id : allItemIdsCache)
+            {
+                if (id == null || id <= 0) continue;
+                try
+                {
+                    ItemComposition comp = itemManager.getItemComposition(id);
+                    if (comp == null) continue;
+                    String name = comp.getName();
+                    if (name == null || name.equalsIgnoreCase("null")) continue;
+                    String lname = name.toLowerCase();
+                    boolean all = true;
+                    for (String t : tokens)
+                    {
+                        if (!lname.contains(t)) { all = false; break; }
+                    }
+                    if (all)
+                    {
+                        ids.add(id);
+                        if (ids.size() > 500) break;
+                    }
+                }
+                catch (Exception ignored){}
+            }
+        }
+
+        List<Result> out = new ArrayList<>();
+        for (Integer id : ids)
+        {
+            if (id == null || id <= 0) continue;
+            try
+            {
+                ItemComposition comp = itemManager.getItemComposition(id);
+                if (comp == null) continue;
+                String name = comp.getName();
+                if (name == null || name.equalsIgnoreCase("null") || name.isEmpty()) continue;
+
+                boolean isPlaceholder = comp.getPlaceholderId() != -1 && comp.getPlaceholderTemplateId() != -1;
+                boolean isNoted = comp.getNote() != -1 && comp.getLinkedNoteId() != -1;
+                boolean isNormal = !(isPlaceholder || isNoted);
+                boolean duplicator =
+                        comp.getNote() != -1 ||
+                                comp.getLinkedNoteId() != -1 ||
+                                comp.getPlaceholderId() != -1 ||
+                                comp.getPlaceholderTemplateId() != -1;
+                boolean stackable = comp.isStackable() || isNoted;
+                boolean members = comp.isMembers();
+
+                BufferedImage img = itemManager.getImage(id);
+                List<String> actions = extractActions(comp);
+
+                // Display string (list): Name (ID)
+                String listDisplay = name + " (" + id + ")";
+                out.add(new Result(id, name, listDisplay, img, stackable, isNoted, isPlaceholder, isNormal, members, duplicator, actions));
+            }
+            catch (Exception ignored){}
+            if (out.size() >= 500) break;
+        }
+
+        sortResults(out);
+        return out;
+    }
+
+    private void sortResults(List<Result> list)
+    {
+        SortMode mode = (SortMode) sortCombo.getSelectedItem();
+        if (mode == null) mode = SortMode.NAME_ASC;
+        Comparator<Result> cmp;
+        switch (mode)
+        {
+            case NAME_DESC: cmp = Comparator.comparing((Result r) -> r.listDisplay.toLowerCase()).reversed(); break;
+            case ID_ASC: cmp = Comparator.comparingInt(r -> r.itemId); break;
+            case ID_DESC: cmp = Comparator.comparingInt((Result r) -> r.itemId).reversed(); break;
+            case NAME_ASC:
+            default: cmp = Comparator.comparing((Result r) -> r.listDisplay.toLowerCase()); break;
+        }
+        list.sort(cmp);
+    }
+
+    private void resortCurrentResults()
+    {
+        List<Result> current = new ArrayList<>();
+        for (int i = 0; i < listModel.size(); i++)
+        {
+            Result r = listModel.get(i);
+            if (r.itemId > 0) current.add(r);
+        }
+        if (current.isEmpty()) return;
+        sortResults(current);
+
+        Result selected = resultList.getSelectedValue();
+        listModel.clear();
+        for (Result r : current) listModel.addElement(r);
+        status(current.size() + " result(s)");
+
+        if (selected != null)
+        {
+            for (int i = 0; i < listModel.size(); i++)
+            {
+                if (listModel.get(i).itemId == selected.itemId)
+                {
+                    resultList.setSelectedIndex(i);
+                    break;
+                }
+            }
+        }
+        else if (!listModel.isEmpty())
+        {
+            resultList.setSelectedIndex(0);
+        }
+    }
+
+    private List<Integer> invokeItemManagerSearch(String query)
+    {
+        try
+        {
+            Method m = itemManager.getClass().getMethod("search", String.class);
+            Object res = m.invoke(itemManager, query);
+            if (res instanceof Collection)
+            {
+                List<Integer> list = new ArrayList<>();
+                for (Object o : (Collection<?>) res)
+                {
+                    if (o instanceof Integer)
+                        list.add((Integer) o);
+                    else if (o != null)
+                    {
+                        try
+                        {
+                            Method mid = o.getClass().getMethod("getItemId");
+                            Object idObj = mid.invoke(o);
+                            if (idObj instanceof Integer) list.add((Integer) idObj);
+                        }
+                        catch (Exception ignore)
+                        {
+                            try
+                            {
+                                Method mid2 = o.getClass().getMethod("getId");
+                                Object idObj2 = mid2.invoke(o);
+                                if (idObj2 instanceof Integer) list.add((Integer) idObj2);
+                            }
+                            catch (Exception ignore2){}
+                        }
+                    }
+                }
+                return list;
+            }
+        }
+        catch (Exception ignored) {}
+        return Collections.emptyList();
+    }
+
+    private void ensureIndex()
+    {
+        if (allItemIdsCache != null || buildingIndex) return;
+        buildingIndex = true;
+        int max = 40_000;
+        List<Integer> tmp = new ArrayList<>(8000);
+        for (int id = 1; id < max; id++)
+        {
+            try
+            {
+                ItemComposition comp = itemManager.getItemComposition(id);
+                if (comp != null)
+                {
+                    String nm = comp.getName();
+                    if (nm != null && !nm.equalsIgnoreCase("null"))
+                        tmp.add(id);
+                }
+            }
+            catch (Exception ignored){}
+        }
+        allItemIdsCache = tmp;
+        buildingIndex = false;
+    }
+
+    private List<String> extractActions(ItemComposition comp)
+    {
+        List<String> act = new ArrayList<>();
+        String[] inv = comp.getInventoryActions();
+        if (inv != null)
+        {
+            for (String a : inv)
+                if (a != null && !a.equalsIgnoreCase("null") && !a.trim().isEmpty())
+                    act.add(a);
+        }
+        if (!act.contains("Examine"))
+            act.add("Examine");
+        return act;
+    }
+
+    private void updateDetails(Result r)
+    {
+        if (r == null || r.itemId <= 0)
+        {
+            detailArea.setText("");
+            largeIconLabel.setIcon(null);
+            return;
+        }
+
+        if (r.icon != null)
+        {
+            Image scaled = r.icon.getScaledInstance(56, 56, Image.SCALE_FAST);
+            largeIconLabel.setIcon(new ImageIcon(scaled));
+        }
+        else
+        {
+            largeIconLabel.setIcon(null);
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(r.itemName).append('\n');              // Navn
+        sb.append("ID         : ").append(r.itemId).append('\n'); // Egen ID-linje
+        sb.append("Normal     : ").append(r.normal ? "Yes" : "No").append('\n');
+        sb.append("Noted      : ").append(r.noted ? "Yes" : "No").append('\n');
+        sb.append("Placeholder: ").append(r.placeholder ? "Yes" : "No").append('\n');
+        sb.append("Duplicator : ").append(r.duplicator ? "Yes" : "No").append('\n');
+        sb.append("Stackable  : ").append(r.stackable ? "Yes" : "No").append('\n');
+        sb.append("Members    : ").append(r.members ? "Yes" : "No").append('\n');
+        sb.append("Actions    : ");
+        if (r.actions.isEmpty()) sb.append("(none)");
+        else sb.append(String.join(", ", r.actions));
+        detailArea.setText(sb.toString());
+        detailArea.setCaretPosition(0);
+    }
+
+    private void status(String s) { statusLabel.setText(s); }
+
+    /* ================= Data class ================= */
+
+    private static class Result
+    {
+        final int itemId;
+        final String itemName;   // nytt: bare navnet
+        final String listDisplay; // teksten i lista (Name (ID) eller status)
+        final BufferedImage icon;
+        final boolean stackable;
+        final boolean noted;
+        final boolean placeholder;
+        final boolean normal;
+        final boolean members;
+        final boolean duplicator;
+        final List<String> actions;
+
+        Result(int itemId, String itemName, String listDisplay, BufferedImage icon,
+               boolean stackable, boolean noted, boolean placeholder,
+               boolean normal, boolean members, boolean duplicator,
+               List<String> actions)
+        {
+            this.itemId = itemId;
+            this.itemName = itemName != null ? itemName : listDisplay;
+            this.listDisplay = listDisplay;
+            this.icon = icon;
+            this.stackable = stackable;
+            this.noted = noted;
+            this.placeholder = placeholder;
+            this.normal = normal;
+            this.members = members;
+            this.duplicator = duplicator;
+            this.actions = actions;
+        }
+
+        @Override public String toString(){ return listDisplay; }
+    }
+
+    private enum SortMode
+    {
+        NAME_ASC("Name A-Z"),
+        NAME_DESC("Name Z-A"),
+        ID_ASC("ID Low-High"),
+        ID_DESC("ID High-Low");
+
+        private final String label;
+        SortMode(String label){ this.label = label; }
+        @Override public String toString(){ return label; }
+    }
+
+    private class Renderer extends JPanel implements ListCellRenderer<Result>
+    {
+        private final JLabel iconLabel = new JLabel();
+        private final JLabel textLabel = new JLabel();
+        private final Font mainFont = new Font(FONT_FAMILY, Font.PLAIN, (int) LIST_MAIN_FONT_SIZE);
+
+        Renderer()
+        {
+            setLayout(new BorderLayout(6,0));
+            setOpaque(true);
+            iconLabel.setPreferredSize(new Dimension(32,32));
+            textLabel.setFont(mainFont);
+            add(iconLabel, BorderLayout.WEST);
+            add(textLabel, BorderLayout.CENTER);
+            setBorder(BorderFactory.createEmptyBorder(4,6,4,12));
+        }
+
+        @Override
+        protected void paintComponent(Graphics g)
+        {
+            Graphics2D g2 = (Graphics2D) g;
+            g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,
+                    RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+            g2.setRenderingHint(RenderingHints.KEY_FRACTIONALMETRICS,
+                    RenderingHints.VALUE_FRACTIONALMETRICS_OFF);
+            super.paintComponent(g2);
+        }
+
+        @Override
+        public Component getListCellRendererComponent(JList<? extends Result> list, Result value,
+                                                      int index, boolean isSelected, boolean cellHasFocus)
+        {
+            if (value == null)
+            {
+                textLabel.setText("");
+                iconLabel.setIcon(null);
+            }
+            else
+            {
+                textLabel.setText(value.listDisplay);
+                if (value.icon != null)
+                {
+                    Image scaled = value.icon.getScaledInstance(32, 32, Image.SCALE_FAST);
+                    iconLabel.setIcon(new ImageIcon(scaled));
+                }
+                else iconLabel.setIcon(null);
+            }
+
+            Color baseBg = list.getBackground();
+            if (isSelected)
+            {
+                setBackground(list.getSelectionBackground());
+                textLabel.setForeground(list.getSelectionForeground());
+            }
+            else if (index == hoverIndex)
+            {
+                setBackground(deriveHoverColor(baseBg));
+                textLabel.setForeground(list.getForeground());
+            }
+            else
+            {
+                setBackground(baseBg);
+                textLabel.setForeground(list.getForeground());
+            }
+
+            return this;
+        }
+
+        private Color deriveHoverColor(Color base)
+        {
+            int r = Math.min(255, (int)(base.getRed()   * 1.08) + 10);
+            int g = Math.min(255, (int)(base.getGreen() * 1.08) + 10);
+            int b = Math.min(255, (int)(base.getBlue()  * 1.08) + 10);
+            int avg = (base.getRed()+base.getGreen()+base.getBlue())/3;
+            if (avg > 200)
+            {
+                r = Math.max(0, base.getRed() - 12);
+                g = Math.max(0, base.getGreen() - 12);
+                b = Math.max(0, base.getBlue() - 12);
+            }
+            return new Color(r,g,b);
+        }
+    }
+
+    private static class AATextArea extends JTextArea
+    {
+        AATextArea(){ super(); }
+        @Override
+        protected void paintComponent(Graphics g)
+        {
+            Graphics2D g2 = (Graphics2D) g;
+            g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,
+                    RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+            g2.setRenderingHint(RenderingHints.KEY_FRACTIONALMETRICS,
+                    RenderingHints.VALUE_FRACTIONALMETRICS_OFF);
+            super.paintComponent(g2);
+        }
+    }
+}
