@@ -21,19 +21,21 @@ import java.awt.image.BufferedImage;
 
 /**
  * Loadout slot.
- * Quantity text moved to top-left (previously top-right).
+ * Quantity text moved to top-left.
  */
 public class LoadoutSlot extends JComponent
 {
     private static final boolean DEBUG_MENU = false;
-    private static final int SLOT_SIZE = 48;
+
+    // Reduced from 52 -> 50 for slightly smaller slots
+    private static final int SLOT_SIZE = 50;
     private static final Dimension SIZE = new Dimension(SLOT_SIZE, SLOT_SIZE);
 
     private static final int AMOUNT_FONT_SIZE = 13;
     private static final Font AMOUNT_FONT = new Font("SansSerif", Font.BOLD, AMOUNT_FONT_SIZE);
     private static final int AMOUNT_INSET = 2;
 
-    // Toggle a subtle background behind quantity for readability
+    // Subtle background behind quantity for readability
     private static final boolean SHOW_QTY_BG = true;
 
     private final ItemManager itemManager;
@@ -289,7 +291,7 @@ public class LoadoutSlot extends JComponent
             g2.drawImage(cachedIcon, x, y, null);
         }
 
-        // Quantity top-left now
+        // Quantity top-left
         if (itemId > 0 && quantity > 1)
         {
             String txt = formatQuantity(quantity);
@@ -299,7 +301,7 @@ public class LoadoutSlot extends JComponent
             int textW = fm.stringWidth(txt);
             int ascent = fm.getAscent();
 
-            int x = AMOUNT_INSET;               // LEFT instead of right aligned
+            int x = AMOUNT_INSET;               // left-aligned
             int y = ascent + AMOUNT_INSET;
 
             if (SHOW_QTY_BG)
@@ -311,7 +313,6 @@ public class LoadoutSlot extends JComponent
             }
             else
             {
-                // Outline (kept if no background)
                 g2.setColor(Color.BLACK);
                 for (int ox = -1; ox <= 1; ox++)
                     for (int oy = -1; oy <= 1; oy++)
