@@ -23,6 +23,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class ItemSearchDialog extends JDialog
 {
+    private static final String MEMBERS_SUFFIX_REGEX = "(?i) \\((members)\\)$";
+    private static String sanitizeName(String s){ return s == null ? "" : s.replaceAll(MEMBERS_SUFFIX_REGEX, "").trim(); }
+
     private static final float LIST_MAIN_FONT_SIZE = 16f;
     private static final float LIST_META_FONT_SIZE = 15f;
     private static final float DETAIL_FONT_SIZE    = 16f;
@@ -343,7 +346,7 @@ public class ItemSearchDialog extends JDialog
     private List<Result> performSearchOnClientThread(String raw)
     {
         String[] tokens = Arrays.stream(raw.toLowerCase().split("\\s+"))
-                .map(t -> t.replace("*","").trim())
+                .map(t -> t.replace("*", "").trim())
                 .filter(t -> !t.isEmpty())
                 .toArray(String[]::new);
 
@@ -367,7 +370,7 @@ public class ItemSearchDialog extends JDialog
                 {
                     ItemComposition comp = itemManager.getItemComposition(id);
                     if (comp == null) continue;
-                    String name = comp.getName();
+                    String name = sanitizeName(comp.getName());
                     if (name == null || name.equalsIgnoreCase("null")) continue;
                     String lname = name.toLowerCase();
                     boolean all = true;
@@ -391,7 +394,7 @@ public class ItemSearchDialog extends JDialog
             {
                 ItemComposition comp = itemManager.getItemComposition(id);
                 if (comp == null) continue;
-                String name = comp.getName();
+                String name = sanitizeName(comp.getName());
                 if (name == null || name.equalsIgnoreCase("null") || name.isEmpty()) continue;
 
                 boolean placeholder = comp.getPlaceholderId() != -1 && comp.getPlaceholderTemplateId() != -1;
@@ -404,7 +407,7 @@ public class ItemSearchDialog extends JDialog
                 List<String> actions = extractActions(comp);
 
                 boolean wearable = isWearable(actions);
-                boolean consumable = isConsumable(actions, name);
+                boolean consumable = isConsumable(actions, noted, placeholder);
 
                 String listDisplay = name + " (" + id + ")";
                 out.add(new Result(id, name, listDisplay, img,
@@ -423,31 +426,30 @@ public class ItemSearchDialog extends JDialog
         for (String a : actions)
         {
             if (a == null) continue;
-            String x = a.toLowerCase();
+            String x = a.toLowerCase(Locale.ROOT);
             if (x.contains("wear") || x.contains("wield") || x.contains("equip")) return true;
         }
         return false;
     }
 
-    private boolean isConsumable(List<String> actions, String name)
+    private static final String[] CONSUME_ACTIONS = {
+            "eat","drink","sip","quaff","guzzle","consume","bite","nibble","swallow" };
+
+    private boolean isConsumable(List<String> actions, boolean noted, boolean placeholder)
     {
-        String lowerName = name.toLowerCase();
-        for (String a : actions)
+        if (noted || placeholder) return false; // exclude noted & placeholder variants
+        if (actions == null || actions.isEmpty()) return false;
+        for (String raw : actions)
         {
-            if (a == null) continue;
-            String x = a.toLowerCase();
-            if (x.contains("eat") || x.contains("drink") || x.contains("sip") || x.contains("consume")) return true;
+            if (raw == null) continue;
+            String a = raw.trim().toLowerCase(Locale.ROOT);
+            for (String base : CONSUME_ACTIONS)
+            {
+                if (a.equals(base) || a.startsWith(base + " "))
+                    return true;
+            }
         }
-        return lowerName.contains("potion") ||
-                lowerName.contains("dose") ||
-                lowerName.contains("cake") ||
-                lowerName.contains("pie") ||
-                lowerName.contains("brew") ||
-                lowerName.contains("tea") ||
-                lowerName.contains("wine") ||
-                lowerName.contains("food") ||
-                lowerName.contains("shark") ||
-                lowerName.contains("lobster");
+        return false;
     }
 
     private void sortResults(List<Result> list)

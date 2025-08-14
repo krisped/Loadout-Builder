@@ -21,9 +21,11 @@ import javax.swing.border.TitledBorder;
 import java.awt.*;
 import java.awt.datatransfer.StringSelection;
 import java.awt.image.BufferedImage;
+import java.io.OutputStream; // added
 import java.lang.reflect.Method;
 import java.util.*;
 import java.util.List;
+import java.util.function.Consumer;
 
 /*
  * LoadoutBuilderPanel – Stabil v6
@@ -84,7 +86,18 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
     private JPanel inventorySection;
     private JPanel loadoutSection;
 
+    private JTabbedPane tabbedPane; // NEW store reference to switch tabs
+    private JComboBox<Loadout> quickPresetCombo; // NEW quick dropdown
+    private boolean suppressComboEvent = false; // guard
+
     private final Gson gson = new Gson();
+
+    private final LoadoutManager loadoutManager; // NEW
+    private final LoadoutBuilderConfig config;   // NEW discord config reference
+
+    // Presets UI references
+    private DefaultListModel<Loadout> presetsModel; // NEW
+    private JList<Loadout> presetsList; // NEW
 
     private static final EquipmentInventorySlot[] EQ_INDEX_MAP = new EquipmentInventorySlot[]{
             EquipmentInventorySlot.HEAD,
@@ -103,12 +116,17 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
             EquipmentInventorySlot.AMMO
     };
 
-    public LoadoutBuilderPanel(ItemManager itemManager, ClientThread clientThread, Client client)
+    // NEW: tracks currently loaded preset (null = unsaved/new)
+    private Loadout currentLoadedLoadout;
+
+    public LoadoutBuilderPanel(ItemManager itemManager, ClientThread clientThread, Client client, LoadoutManager loadoutManager, LoadoutBuilderConfig config)
     {
         super(false);
         this.itemManager = itemManager;
         this.clientThread = clientThread;
         this.client = client;
+        this.loadoutManager = loadoutManager; // NEW
+        this.config = config; // NEW
         setBackground(ColorScheme.DARK_GRAY_COLOR);
         initFonts();
         buildUI();
@@ -135,15 +153,17 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
     {
         setLayout(new BorderLayout());
 
+        tabbedPane = new JTabbedPane();
+
+        // ===== Builder tab (restore original vertical layout) =====
         JPanel root = new JPanel();
         root.setOpaque(false);
         root.setLayout(new BoxLayout(root, BoxLayout.Y_AXIS));
-
         root.add(buildEquipmentSection());
         root.add(Box.createVerticalStrut(SECTION_SPACING));
         root.add(buildInventorySection());
         root.add(Box.createVerticalStrut(SECTION_SPACING));
-        root.add(buildLoadoutSection());
+        root.add(buildLoadoutSection()); // save button now embedded here
 
         JScrollPane scroll = new JScrollPane(root,
                 JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED,
@@ -152,8 +172,397 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         scroll.getVerticalScrollBar().setUnitIncrement(16);
         scroll.getViewport().setBackground(ColorScheme.DARK_GRAY_COLOR);
 
-        add(scroll, BorderLayout.CENTER);
+        // Container holding quick preset bar on top (outside scroll) to avoid width distortion
+        JPanel builderContainer = new JPanel(new BorderLayout());
+        builderContainer.setOpaque(false);
+        builderContainer.add(buildQuickPresetBar(), BorderLayout.NORTH);
+        builderContainer.add(scroll, BorderLayout.CENTER);
+        tabbedPane.addTab("Builder", builderContainer);
+
+        // ===== Presets tab =====
+        JPanel presetsPanel = buildPresetsPanel();
+        tabbedPane.addTab("Presets", presetsPanel);
+
+        add(tabbedPane, BorderLayout.CENTER);
         unifySectionWidths();
+    }
+
+    // NEW: quick preset bar on top of builder
+    private JPanel buildQuickPresetBar()
+    {
+        JPanel bar = new JPanel(new BorderLayout(6,0));
+        bar.setOpaque(false);
+        JLabel lbl = new JLabel("Preset:");
+        Font labelFont = (runescapeBold != null ? runescapeBold : fallback).deriveFont(Font.BOLD, 15f);
+        lbl.setFont(labelFont);
+        quickPresetCombo = new JComboBox<>();
+        Font comboFont = (runescape != null ? runescape : fallback).deriveFont(Font.PLAIN, 15f);
+        quickPresetCombo.setFont(comboFont);
+        quickPresetCombo.setMaximumRowCount(22);
+        quickPresetCombo.setRenderer(new DefaultListCellRenderer(){
+            @Override public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus)
+            {
+                JLabel c = (JLabel) super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+                c.setFont(comboFont);
+                if (value instanceof Loadout)
+                    c.setText(((Loadout) value).getName());
+                c.setBorder(BorderFactory.createEmptyBorder(2,6,2,6));
+                return c;
+            }
+        });
+        quickPresetCombo.setPreferredSize(new Dimension(190, BUTTON_HEIGHT + 6));
+        quickPresetCombo.setMaximumSize(new Dimension(210, BUTTON_HEIGHT + 8));
+        quickPresetCombo.addActionListener(e -> {
+            if (suppressComboEvent) return;
+            Loadout sel = (Loadout) quickPresetCombo.getSelectedItem();
+            if (sel != null)
+                applyLoadout(sel);
+        });
+        refreshQuickPresetCombo();
+        bar.add(lbl, BorderLayout.WEST);
+        bar.add(quickPresetCombo, BorderLayout.CENTER);
+        return bar;
+    }
+
+    private void refreshQuickPresetCombo()
+    {
+        if (quickPresetCombo == null) return;
+        suppressComboEvent = true;
+        Object current = quickPresetCombo.getSelectedItem();
+        quickPresetCombo.removeAllItems();
+        if (loadoutManager != null)
+        {
+            for (Loadout l : loadoutManager.getAll())
+                quickPresetCombo.addItem(l);
+        }
+        // restore selection if still present
+        if (current instanceof Loadout)
+        {
+            for (int i = 0; i < quickPresetCombo.getItemCount(); i++)
+            {
+                if (quickPresetCombo.getItemAt(i).getName().equalsIgnoreCase(((Loadout) current).getName()))
+                {
+                    quickPresetCombo.setSelectedIndex(i);
+                    break;
+                }
+            }
+        }
+        suppressComboEvent = false;
+    }
+
+    // Updated Presets tab to simpler UI
+    private JPanel buildPresetsPanel() {
+        JPanel panel = new JPanel();
+        panel.setOpaque(false);
+        panel.setLayout(new BorderLayout(4,4));
+
+        // Heading for clarity
+        JLabel heading = new JLabel("Saved Loadouts");
+        heading.setBorder(new EmptyBorder(6,8,2,8));
+        heading.setFont((runescapeBold != null ? runescapeBold : fallback).deriveFont(Font.BOLD, TITLE_FONT_SIZE));
+        panel.add(heading, BorderLayout.NORTH);
+
+        presetsModel = new DefaultListModel<>();
+        presetsList = new JList<>(presetsModel);
+        presetsList.setVisibleRowCount(12);
+        Font listFont = (runescape != null ? runescape : fallback).deriveFont(Font.PLAIN, 15f);
+        presetsList.setFont(listFont);
+        presetsList.setFixedCellHeight(24);
+        presetsList.setCellRenderer(new DefaultListCellRenderer(){
+            @Override public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus)
+            {
+                JLabel l = (JLabel) super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+                l.setFont(listFont);
+                if (value instanceof Loadout)
+                    l.setText(((Loadout) value).getName());
+                l.setBorder(BorderFactory.createEmptyBorder(2,6,2,6));
+                return l;
+            }
+        });
+        presetsList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        presetsList.addMouseListener(new java.awt.event.MouseAdapter(){
+            @Override public void mouseClicked(java.awt.event.MouseEvent e){ if (e.getClickCount()==2) loadSelectedPreset(); }
+            @Override public void mousePressed(java.awt.event.MouseEvent e){ maybeShowPresetPopup(e); }
+            @Override public void mouseReleased(java.awt.event.MouseEvent e){ maybeShowPresetPopup(e); }
+        });
+        JScrollPane listScroll = new JScrollPane(presetsList);
+        listScroll.setBorder(BorderFactory.createEmptyBorder(4,6,4,6));
+        panel.add(listScroll, BorderLayout.CENTER);
+
+        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.CENTER,6,6));
+        buttonPanel.setOpaque(false);
+        Font btnFont = (runescape != null ? runescape : fallback).deriveFont(Font.PLAIN, 14f);
+        JButton loadButton = new JButton("Load");
+        JButton renameButton = new JButton("Rename");
+        JButton deleteButton = new JButton("Delete");
+        for (JButton b : new JButton[]{loadButton, renameButton, deleteButton})
+        {
+            b.setFont(btnFont); b.setFocusPainted(false);
+        }
+        loadButton.addActionListener(e -> loadSelectedPreset());
+        renameButton.addActionListener(e -> renameSelectedPreset());
+        deleteButton.addActionListener(e -> deleteSelectedPreset());
+        buttonPanel.add(loadButton); buttonPanel.add(renameButton); buttonPanel.add(deleteButton);
+        panel.add(buttonPanel, BorderLayout.SOUTH);
+
+        refreshPresetList();
+        return panel;
+    }
+
+    // NEW helpers for presets
+    private void refreshPresetList()
+    {
+        if (presetsModel == null) return;
+        presetsModel.clear();
+        if (loadoutManager != null)
+            for (Loadout l : loadoutManager.getAll()) presetsModel.addElement(l);
+    }
+
+    private void saveCurrentLoadoutInteractively()
+    {
+        if (currentLoadedLoadout != null)
+        {
+            // Offer overwrite of existing without typing name again
+            int choice = JOptionPane.showConfirmDialog(this,
+                    "Overwrite loadout '" + currentLoadedLoadout.getName() + "'?",
+                    "Overwrite Loadout",
+                    JOptionPane.YES_NO_CANCEL_OPTION,
+                    JOptionPane.QUESTION_MESSAGE);
+            if (choice == JOptionPane.CANCEL_OPTION || choice == JOptionPane.CLOSED_OPTION) return;
+            if (choice == JOptionPane.YES_OPTION)
+            {
+                Loadout snap = snapshot(currentLoadedLoadout.getName());
+                copyInto(currentLoadedLoadout, snap);
+                loadoutManager.update();
+                refreshPresetList();
+                refreshQuickPresetCombo();
+                return;
+            }
+            // If NO selected -> proceed to Save As dialog
+        }
+        // Save As / New workflow
+        String defaultName = suggestDefaultName();
+        String name = (String) JOptionPane.showInputDialog(this,
+                "Loadout name:",
+                "Save Loadout",
+                JOptionPane.PLAIN_MESSAGE,
+                null,
+                null,
+                defaultName);
+        if (name == null) return;
+        name = name.trim();
+        if (name.isEmpty())
+        {
+            JOptionPane.showMessageDialog(this, "Name cannot be empty.", "Save Loadout", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        Loadout existing = findLoadoutByName(name);
+        if (existing != null && existing != currentLoadedLoadout)
+        {
+            int res = JOptionPane.showConfirmDialog(this, "Overwrite existing loadout '"+name+"'?", "Confirm Overwrite", JOptionPane.YES_NO_OPTION);
+            if (res != JOptionPane.YES_OPTION) return;
+        }
+        Loadout snap = snapshot(name);
+        if (existing != null)
+        {
+            copyInto(existing, snap);
+            loadoutManager.update();
+            currentLoadedLoadout = existing;
+        }
+        else
+        {
+            loadoutManager.add(snap);
+            currentLoadedLoadout = findLoadoutByName(name);
+        }
+        refreshPresetList();
+        refreshQuickPresetCombo();
+        // Select in combo
+        if (quickPresetCombo != null && currentLoadedLoadout != null)
+        {
+            suppressComboEvent = true;
+            quickPresetCombo.setSelectedItem(currentLoadedLoadout);
+            suppressComboEvent = false;
+        }
+    }
+
+    private Loadout snapshot(String name)
+    {
+        int eqCount = EquipmentInventorySlot.values().length;
+        Loadout l = new Loadout(name, eqCount, inventorySlots.length);
+        // equipment
+        for (EquipmentInventorySlot slot : EquipmentInventorySlot.values())
+        {
+            int idx = slot.ordinal();
+            LoadoutSlot s = equipmentSlots.get(slot);
+            if (s != null && s.getItemId() > 0)
+            {
+                l.getEquipmentIds()[idx] = s.getItemId();
+                l.getEquipmentQty()[idx] = Math.max(1, s.getQuantity());
+            }
+        }
+        // inventory
+        for (int i = 0; i < inventorySlots.length; i++)
+        {
+            LoadoutSlot s = inventorySlots[i];
+            if (s.getItemId() > 0)
+            {
+                l.getInventoryIds()[i] = s.getItemId();
+                l.getInventoryQty()[i] = Math.max(1, s.getQuantity());
+            }
+        }
+        return l;
+    }
+
+    private void applyLoadout(Loadout l)
+    {
+        if (l == null) return;
+        resetAll();
+        // equipment
+        for (EquipmentInventorySlot slot : EquipmentInventorySlot.values())
+        {
+            int idx = slot.ordinal();
+            if (idx < l.getEquipmentIds().length)
+            {
+                int id = l.getEquipmentIds()[idx];
+                int q = (idx < l.getEquipmentQty().length) ? l.getEquipmentQty()[idx] : 1;
+                if (id > 0) equipmentSlots.get(slot).setItem(id, q);
+            }
+        }
+        // inventory
+        for (int i = 0; i < inventorySlots.length && i < l.getInventoryIds().length; i++)
+        {
+            int id = l.getInventoryIds()[i];
+            int q = (i < l.getInventoryQty().length) ? l.getInventoryQty()[i] : 1;
+            if (id > 0) inventorySlots[i].setItem(id, q);
+        }
+        currentLoadedLoadout = l; // track loaded preset
+        // sync combo selection
+        if (quickPresetCombo != null)
+        {
+            suppressComboEvent = true;
+            for (int i = 0; i < quickPresetCombo.getItemCount(); i++)
+            {
+                if (quickPresetCombo.getItemAt(i).getName().equalsIgnoreCase(l.getName()))
+                {
+                    quickPresetCombo.setSelectedIndex(i);
+                    break;
+                }
+            }
+            suppressComboEvent = false;
+        }
+    }
+
+    private void newLoadout()
+    {
+        // Reset slots
+        resetAll();
+        // Clear current reference and combo selection
+        currentLoadedLoadout = null;
+        if (quickPresetCombo != null)
+        {
+            suppressComboEvent = true;
+            quickPresetCombo.setSelectedItem(null);
+            quickPresetCombo.setSelectedIndex(-1);
+            suppressComboEvent = false;
+        }
+    }
+
+    private void loadSelectedPreset()
+    {
+        if (presetsList == null) return;
+        Loadout sel = presetsList.getSelectedValue();
+        if (sel == null) return;
+        applyLoadout(sel);
+        currentLoadedLoadout = sel;
+        switchToBuilderTab();
+        // removed load confirmation dialog
+    }
+
+    private void deleteSelectedPreset()
+    {
+        if (presetsList == null) return;
+        Loadout sel = presetsList.getSelectedValue();
+        if (sel == null) return;
+        int res = JOptionPane.showConfirmDialog(this, "Delete loadout '"+sel.getName()+"'?", "Confirm Delete", JOptionPane.YES_NO_OPTION);
+        if (res != JOptionPane.YES_OPTION) return;
+        loadoutManager.remove(sel);
+        refreshPresetList();
+        refreshQuickPresetCombo();
+    }
+
+    private void renameSelectedPreset()
+    {
+        if (presetsList == null) return;
+        Loadout sel = presetsList.getSelectedValue();
+        if (sel == null) return;
+        String newName = JOptionPane.showInputDialog(this, "New name:", sel.getName());
+        if (newName == null) return;
+        newName = newName.trim();
+        if (newName.isEmpty())
+        {
+            JOptionPane.showMessageDialog(this, "Name cannot be empty.", "Rename", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        Loadout conflict = findLoadoutByName(newName);
+        if (conflict != null && conflict != sel)
+        {
+            JOptionPane.showMessageDialog(this, "A loadout with that name already exists.", "Rename", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        loadoutManager.rename(sel, newName);
+        refreshPresetList();
+        refreshQuickPresetCombo();
+        currentLoadedLoadout = sel; // keep reference (renamed)
+    }
+
+    private void switchToBuilderTab()
+    {
+        if (tabbedPane != null)
+            tabbedPane.setSelectedIndex(0);
+    }
+
+    private Loadout findLoadoutByName(String name)
+    {
+        if (loadoutManager == null) return null;
+        for (Loadout l : loadoutManager.getAll())
+            if (l.getName().equalsIgnoreCase(name)) return l;
+        return null;
+    }
+
+    // Added: generate a sensible default name when saving a new loadout or doing "Save As".
+    private String suggestDefaultName()
+    {
+        // If we are saving a copy of an existing loaded loadout, try to reuse its name or a numbered variant.
+        if (currentLoadedLoadout != null)
+        {
+            String base = currentLoadedLoadout.getName();
+            if (base != null && !base.isBlank())
+            {
+                // If the base name is free (because user chose Save As after declining overwrite), just use it.
+                if (findLoadoutByName(base) == null) return base;
+                // Otherwise append (2), (3), ... until free.
+                for (int i = 2; i < 1000; i++)
+                {
+                    String candidate = base + " (" + i + ")";
+                    if (findLoadoutByName(candidate) == null) return candidate;
+                }
+            }
+        }
+        // Fallback pattern: Loadout 1, Loadout 2, ...
+        for (int i = 1; i < 1000; i++)
+        {
+            String candidate = "Loadout " + i;
+            if (findLoadoutByName(candidate) == null) return candidate;
+        }
+        return "Loadout"; // absolute fallback
+    }
+
+    private void copyInto(Loadout target, Loadout source)
+    {
+        System.arraycopy(source.getEquipmentIds(), 0, target.getEquipmentIds(), 0, target.getEquipmentIds().length);
+        System.arraycopy(source.getEquipmentQty(), 0, target.getEquipmentQty(), 0, target.getEquipmentQty().length);
+        System.arraycopy(source.getInventoryIds(), 0, target.getInventoryIds(), 0, target.getInventoryIds().length);
+        System.arraycopy(source.getInventoryQty(), 0, target.getInventoryQty(), 0, target.getInventoryQty().length);
     }
 
     private JPanel titledSection(String title)
@@ -230,11 +639,12 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         JPanel row = new JPanel(new GridLayout(1, 2, 6, 0));
         row.setOpaque(false);
         copyButton = makeButton("Copy equipped");
-        clearButton = makeButton("Clear all");
+        // Replace Clear all with New
+        JButton newButton = makeButton("New");
         copyButton.addActionListener(e -> copyLoadout());
-        clearButton.addActionListener(e -> resetAll());
+        newButton.addActionListener(e -> newLoadout());
         row.add(copyButton);
-        row.add(clearButton);
+        row.add(newButton);
         row.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         section.add(Box.createVerticalStrut(4)); // was 6 before button row
@@ -285,8 +695,8 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         repcalArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, (int) TEXTAREA_FONT_SIZE));
         repcalArea.setLineWrap(true);
         repcalArea.setWrapStyleWord(false);
-        repcalArea.setRows(9); // was 10, reduce height slightly
-        repcalArea.setColumns(26); // limit width so section doesn't expand full panel width
+        repcalArea.setRows(9);
+        repcalArea.setColumns(26);
         repcalArea.setTabSize(4);
 
         JScrollPane sp = new JScrollPane(repcalArea,
@@ -295,7 +705,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         sp.setBorder(BorderFactory.createLineBorder(new Color(70,70,70)));
         sp.setAlignmentX(Component.LEFT_ALIGNMENT);
         section.add(sp);
-        section.add(Box.createVerticalStrut(4)); // was 6 before loadout buttons
+        section.add(Box.createVerticalStrut(4));
 
         JPanel btnGrid = new JPanel(new GridLayout(2, 2, 6, 6));
         btnGrid.setOpaque(false);
@@ -326,6 +736,14 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         btnGrid.add(exportButton);
         btnGrid.setAlignmentX(Component.LEFT_ALIGNMENT);
         section.add(btnGrid);
+
+        // Embedded save button (keeps original vertical flow)
+        section.add(Box.createVerticalStrut(4));
+        JButton saveBtn = makeButton("Save loadout");
+        saveBtn.addActionListener(e -> saveCurrentLoadoutInteractively());
+        saveBtn.setAlignmentX(Component.LEFT_ALIGNMENT);
+        section.add(saveBtn);
+
         constrainSectionWidth(section);
         return section;
     }
@@ -612,23 +1030,30 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
             {
                 if (finalTickCount > 0) appendTicksBlock(sb, finalTickCount); else sb.append("\n");
             }
-
+            // Inventory
             LinkedHashMap<String,Integer> invCounts = new LinkedHashMap<>();
+            // iterate current panel inventory slots (not a stored loadout)
             for (LoadoutSlot ls : inventorySlots)
             {
                 if (ls.getItemId() <= 0) continue;
-                int add = ls.isStackable() ? Math.max(1, ls.getQuantity()) : 1;
-                invCounts.merge(resolveName(ls), add, Integer::sum);
+                int id = ls.getItemId();
+                String rawName = "item_" + id;
+                boolean stackable = false;
+                try
+                {
+                    ItemComposition comp = itemManager.getItemComposition(id);
+                    rawName = sanitizeItemName(comp.getName());
+                    stackable = comp.isStackable() || comp.getNote() != -1;
+                }
+                catch (Exception ignored) {}
+                int qty = Math.max(1, ls.getQuantity());
+                int add = stackable ? qty : 1;
+                invCounts.merge(rawName, add, Integer::sum);
             }
             for (Map.Entry<String,Integer> e : invCounts.entrySet())
             {
-                sb.append("WITHDRAW ")
-                        .append(kittyKeysItemName(e.getKey()))
-                        .append(" ")
-                        .append(e.getValue())
-                        .append("\n");
+                sb.append("WITHDRAW ").append(kittyKeysItemName(e.getKey())).append(" ").append(e.getValue()).append('\n');
             }
-
             String out = sb.toString().trim();
             SwingUtilities.invokeLater(() -> {
                 repcalArea.setText(out);
@@ -826,7 +1251,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
             try { n = itemManager.getItemComposition(ls.getItemId()).getName(); }
             catch (Exception ignored) { n = "Item " + ls.getItemId(); }
         }
-        return n;
+        return sanitizeItemName(n);
     }
 
     private String equipmentCode(EquipmentInventorySlot slot)
@@ -848,206 +1273,249 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         }
     }
 
-    private Map<String, EquipmentInventorySlot> codeToSlotMap()
+    private String buildRepcalForLoadout(Loadout loadout)
     {
-        Map<String, EquipmentInventorySlot> m = new HashMap<>();
-        m.put("H", EquipmentInventorySlot.HEAD);
-        m.put("CA", EquipmentInventorySlot.CAPE);
-        m.put("N", EquipmentInventorySlot.AMULET);
-        m.put("W", EquipmentInventorySlot.WEAPON);
-        m.put("C", EquipmentInventorySlot.BODY);
-        m.put("S", EquipmentInventorySlot.SHIELD);
-        m.put("L", EquipmentInventorySlot.LEGS);
-        m.put("G", EquipmentInventorySlot.GLOVES);
-        m.put("B", EquipmentInventorySlot.BOOTS);
-        m.put("R", EquipmentInventorySlot.RING);
-        m.put("A", EquipmentInventorySlot.AMMO);
-        return m;
-    }
-
-    /* Item search cache */
-    private volatile List<Integer> allItemIdsCache = null;
-    private volatile boolean buildingIndex = false;
-    private Map<String,Integer> exactNameMap = null;
-
-    private void ensureIndex()
-    {
-        if (allItemIdsCache != null || buildingIndex) return;
-        buildingIndex = true;
-        List<Integer> tmp = new ArrayList<>(9000);
-        for (int id = 1; id < 40_000; id++)
+        if (loadout == null) return "";
+        StringBuilder sb = new StringBuilder();
+        // Order copied from generateRepcalString
+        EquipmentInventorySlot[] order = {
+                EquipmentInventorySlot.BOOTS,
+                EquipmentInventorySlot.AMULET,
+                EquipmentInventorySlot.SHIELD,
+                EquipmentInventorySlot.CAPE,
+                EquipmentInventorySlot.GLOVES,
+                EquipmentInventorySlot.BODY,
+                EquipmentInventorySlot.HEAD,
+                EquipmentInventorySlot.RING,
+                EquipmentInventorySlot.LEGS,
+                EquipmentInventorySlot.WEAPON,
+                EquipmentInventorySlot.AMMO
+        };
+        int[] eqIds = loadout.getEquipmentIds();
+        int[] eqQty = loadout.getEquipmentQty();
+        for (EquipmentInventorySlot slot : order)
         {
+            int idx = slot.ordinal();
+            if (idx >= eqIds.length) continue;
+            int id = eqIds[idx];
+            if (id <= 0) continue;
+            int qty = (idx < eqQty.length && eqQty[idx] > 0) ? eqQty[idx] : 1;
+            String name = "Item " + id;
+            try { name = sanitizeItemName(itemManager.getItemComposition(id).getName()); }
+            catch (Exception ignored) {}
+            boolean stackable = false;
             try
             {
-                String nm = itemManager.getItemComposition(id).getName();
-                if (nm != null && !"null".equalsIgnoreCase(nm))
-                    tmp.add(id);
+                ItemComposition comp = itemManager.getItemComposition(id);
+                stackable = comp.isStackable() || comp.getNote() != -1;
             }
-            catch (Exception ignored){}
+            catch (Exception ignored) {}
+            String outQty;
+            if ((slot == EquipmentInventorySlot.WEAPON || slot == EquipmentInventorySlot.AMMO) && stackable && qty > 1)
+                outQty = "*"; // wildcard semantics kept
+            else
+                outQty = Integer.toString(Math.max(1, qty));
+            sb.append(equipmentCode(slot)).append(":").append(name).append(":").append(outQty).append('\n');
         }
-        allItemIdsCache = tmp;
-        buildingIndex = false;
-    }
-
-    private void ensureExactNameMap()
-    {
-        if (exactNameMap != null) return;
-        ensureIndex();
-        Map<String,Integer> map = new HashMap<>();
-        if (allItemIdsCache != null)
+        // Inventory aggregation
+        LinkedHashMap<String,Integer> invCounts = new LinkedHashMap<>();
+        int[] invIds = loadout.getInventoryIds();
+        int[] invQty = loadout.getInventoryQty();
+        for (int i = 0; i < invIds.length; i++)
         {
-            for (int id : allItemIdsCache)
-            {
-                try
-                {
-                    String nm = itemManager.getItemComposition(id).getName();
-                    if (nm != null && !"null".equalsIgnoreCase(nm))
-                        map.putIfAbsent(nm.toLowerCase(), id);
-                }
-                catch (Exception ignored){}
-            }
-        }
-        exactNameMap = map;
-    }
-
-    private int resolveItemId(String nameInput, List<String> errors)
-    {
-        if (nameInput == null || nameInput.isEmpty())
-        {
-            errors.add("Empty name");
-            return -1;
-        }
-        String trimmed = nameInput.trim();
-        String lower = trimmed.toLowerCase();
-        boolean potionHeuristic = false;
-        if (trimmed.endsWith("("))
-        {
-            potionHeuristic = true;
-            trimmed = trimmed.substring(0, trimmed.length()-1);
-            lower = trimmed.toLowerCase();
-        }
-
-        ensureExactNameMap();
-        Integer exact = exactNameMap.get(lower);
-        if (exact != null) return exact;
-
-        if (potionHeuristic)
-        {
-            for (int d = 4; d >= 1; d--)
-            {
-                Integer pot = exactNameMap.get((trimmed + "(" + d + ")").toLowerCase());
-                if (pot != null) return pot;
-            }
-        }
-
-        List<Integer> candidates = searchItems(trimmed);
-        if (candidates.isEmpty())
-        {
-            ensureIndex();
-            if (allItemIdsCache != null)
-            {
-                for (int id : allItemIdsCache)
-                {
-                    try
-                    {
-                        String nm = itemManager.getItemComposition(id).getName();
-                        if (nm != null && nm.toLowerCase().startsWith(lower))
-                            candidates.add(id);
-                        if (candidates.size() >= 150) break;
-                    }
-                    catch (Exception ignored){}
-                }
-            }
-        }
-
-        if (candidates.isEmpty())
-        {
-            errors.add("Item not found: " + nameInput);
-            return -1;
-        }
-
-        int best = -1;
-        double bestScore = Double.NEGATIVE_INFINITY;
-        for (int id : candidates)
-        {
-            double score = 0;
-            ItemComposition comp;
-            String nm;
+            int id = invIds[i];
+            if (id <= 0) continue;
+            String name = "Item " + id;
+            boolean stackable = false;
             try
             {
-                comp = itemManager.getItemComposition(id);
-                nm = comp.getName();
+                ItemComposition comp = itemManager.getItemComposition(id);
+                name = sanitizeItemName(comp.getName());
+                stackable = comp.isStackable() || comp.getNote() != -1;
             }
-            catch (Exception ex) { continue; }
-            if (nm == null) continue;
-
-            String nmL = nm.toLowerCase();
-            if (nmL.equals(lower)) score += 200;
-            if (nmL.startsWith(lower)) score += 40;
-            score -= Math.abs(nm.length() - nameInput.length()) * 1.1;
-
-            boolean noted = comp.getNote() != -1 && comp.getLinkedNoteId() != -1;
-            boolean placeholder = comp.getPlaceholderId() != -1 && comp.getPlaceholderTemplateId() != -1;
-            if (noted) score -= 15;
-            if (placeholder) score -= 15;
-
-            if (score > bestScore)
-            {
-                bestScore = score;
-                best = id;
-            }
+            catch (Exception ignored) {}
+            int qty = (i < invQty.length && invQty[i] > 0) ? invQty[i] : 1;
+            int add = stackable ? qty : 1;
+            invCounts.merge(name, add, Integer::sum);
         }
-
-        if (best <= 0)
-            errors.add("No suitable item match: " + nameInput);
-
-        return best;
+        for (Map.Entry<String,Integer> e : invCounts.entrySet())
+            sb.append("I:").append(e.getKey()).append(":").append(e.getValue()).append('\n');
+        return sb.toString().trim();
     }
 
-    // EN forekomst av searchItems
-    private List<Integer> searchItems(String query)
+    private String buildKittyKeysForLoadout(Loadout loadout, int tickCount)
     {
-        query = query.trim();
-        if (query.isEmpty()) return Collections.emptyList();
-        try
+        if (loadout == null) return "";
+        StringBuilder sb = new StringBuilder();
+        EquipmentInventorySlot[] order = {
+                EquipmentInventorySlot.HEAD,
+                EquipmentInventorySlot.BODY,
+                EquipmentInventorySlot.RING,
+                EquipmentInventorySlot.CAPE,
+                EquipmentInventorySlot.AMULET,
+                EquipmentInventorySlot.WEAPON,
+                EquipmentInventorySlot.SHIELD,
+                EquipmentInventorySlot.LEGS,
+                EquipmentInventorySlot.GLOVES,
+                EquipmentInventorySlot.BOOTS,
+                EquipmentInventorySlot.AMMO
+        };
+        int[] eqIds = loadout.getEquipmentIds();
+        int[] eqQty = loadout.getEquipmentQty();
+        LinkedHashMap<EquipmentInventorySlot,String> eqNames = new LinkedHashMap<>();
+        for (EquipmentInventorySlot slot : order)
         {
-            Method m = itemManager.getClass().getMethod("search", String.class);
-            Object result = m.invoke(itemManager, query);
-            if (result instanceof Collection)
-            {
-                List<Integer> ids = new ArrayList<>();
-                for (Object o : (Collection<?>) result)
-                {
-                    if (o instanceof Integer)
-                        ids.add((Integer) o);
-                    else if (o != null)
-                    {
-                        try
-                        {
-                            Method mid = o.getClass().getMethod("getItemId");
-                            Object v = mid.invoke(o);
-                            if (v instanceof Integer) ids.add((Integer) v);
-                        }
-                        catch (Exception ignore)
-                        {
-                            try
-                            {
-                                Method mid2 = o.getClass().getMethod("getId");
-                                Object v2 = mid2.invoke(o);
-                                if (v2 instanceof Integer) ids.add((Integer) v2);
-                            }
-                            catch (Exception ignore2) {}
-                        }
-                    }
-                }
-                return ids;
-            }
+            int idx = slot.ordinal();
+            if (idx >= eqIds.length) continue;
+            int id = eqIds[idx];
+            if (id <= 0) continue;
+            int qty = (idx < eqQty.length && eqQty[idx] > 0) ? eqQty[idx] : 1;
+            String name = "item_" + id;
+            try { name = kittyKeysItemName(sanitizeItemName(itemManager.getItemComposition(id).getName())); }
+            catch (Exception ignored) {}
+            eqNames.put(slot, name);
+            sb.append("WITHDRAW ").append(name).append(" ").append(Math.max(1, qty)).append('\n');
         }
-        catch (Exception ignored) {}
-        return Collections.emptyList();
+        if (!eqNames.isEmpty())
+        {
+            if (tickCount > 0) appendTicksBlock(sb, tickCount); else sb.append('\n');
+        }
+        for (String nm : eqNames.values())
+            sb.append("BANK_WIELD ").append(nm).append('\n');
+        if (!eqNames.isEmpty())
+        {
+            if (tickCount > 0) appendTicksBlock(sb, tickCount); else sb.append('\n');
+        }
+        // Inventory
+        LinkedHashMap<String,Integer> invCounts = new LinkedHashMap<>();
+        // iterate current panel inventory slots (not a stored loadout)
+        for (LoadoutSlot ls : inventorySlots)
+        {
+            if (ls.getItemId() <= 0) continue;
+            int id = ls.getItemId();
+            String rawName = "item_" + id;
+            boolean stackable = false;
+            try
+            {
+                ItemComposition comp = itemManager.getItemComposition(id);
+                rawName = sanitizeItemName(comp.getName());
+                stackable = comp.isStackable() || comp.getNote() != -1;
+            }
+            catch (Exception ignored) {}
+            int qty = Math.max(1, ls.getQuantity());
+            int add = stackable ? qty : 1;
+            invCounts.merge(rawName, add, Integer::sum);
+        }
+        for (Map.Entry<String,Integer> e : invCounts.entrySet())
+        {
+            sb.append("WITHDRAW ").append(kittyKeysItemName(e.getKey())).append(" ").append(e.getValue()).append('\n');
+        }
+        return sb.toString().trim();
     }
 
-    /* SlotActionHandler */
+    private void maybeShowPresetPopup(java.awt.event.MouseEvent e)
+    {
+        if (!e.isPopupTrigger()) return;
+        int idx = presetsList.locationToIndex(e.getPoint());
+        if (idx >= 0) presetsList.setSelectedIndex(idx);
+        Loadout sel = presetsList.getSelectedValue();
+        if (sel == null) return;
+        JPopupMenu menu = new JPopupMenu();
+        JMenuItem sendRepcal = new JMenuItem("Send Repcal Code to Webhook");
+        JMenuItem sendKitty = new JMenuItem("Send KittyKeys Code to Webhook");
+        sendRepcal.addActionListener(ev -> sendLoadoutToWebhook(sel, true));
+        sendKitty.addActionListener(ev -> sendLoadoutToWebhook(sel, false));
+        menu.add(sendRepcal);
+        menu.add(sendKitty);
+        menu.show(presetsList, e.getX(), e.getY());
+    }
+
+    private void sendLoadoutToWebhook(Loadout loadout, boolean repcal)
+    {
+        String webhook = (config != null) ? config.discordWebhook() : "";
+        if (webhook == null || webhook.trim().isEmpty())
+        {
+            JOptionPane.showMessageDialog(this, "Discord webhook not set in config.", "Webhook", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        clientThread.invokeLater(() -> {
+            String title = loadout.getName();
+            String body = repcal ? buildRepcalForLoadout(loadout) : buildKittyKeysForLoadout(loadout, 4);
+            String payloadText = title + "\n```\n" + body + "\n```";
+            postDiscordWebhookAsync(webhook.trim(), payloadText, success -> SwingUtilities.invokeLater(() -> {
+                if (success)
+                    JOptionPane.showMessageDialog(this, "Webhook sendt.", "Webhook", JOptionPane.INFORMATION_MESSAGE);
+                else
+                    JOptionPane.showMessageDialog(this, "Webhook feilet (se log).", "Webhook", JOptionPane.ERROR_MESSAGE);
+            }));
+        });
+    }
+
+    private void postDiscordWebhookAsync(String url, String content)
+    {
+        postDiscordWebhookAsync(url, content, null);
+    }
+
+    private void postDiscordWebhookAsync(String url, String content, Consumer<Boolean> callback)
+    {
+        String trimmed = content;
+        if (trimmed.length() > 1900)
+            trimmed = trimmed.substring(0, 1900) + "...";
+        final String jsonPayload = "{\"content\":\"" + trimmed.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n") + "\"}";
+        new Thread(() -> {
+            boolean ok = false;
+            try
+            {
+                java.net.URL u = new java.net.URL(url);
+                java.net.HttpURLConnection conn = (java.net.HttpURLConnection) u.openConnection();
+                conn.setRequestMethod("POST");
+                conn.setRequestProperty("Content-Type", "application/json");
+                conn.setDoOutput(true);
+                try (OutputStream os = conn.getOutputStream()) { os.write(jsonPayload.getBytes(java.nio.charset.StandardCharsets.UTF_8)); }
+                int code = conn.getResponseCode();
+                ok = code >= 200 && code < 300;
+                if (!ok) System.err.println("Discord webhook failed: HTTP " + code);
+            }
+            catch (Exception ex)
+            {
+                System.err.println("Discord webhook error: " + ex.getMessage());
+            }
+            if (callback != null) callback.accept(ok);
+        }, "WebhookSender").start();
+    }
+
+    private static final String MEMBERS_SUFFIX_REGEX = "(?i) \\((members)\\)$"; // strip trailing (members)
+    private static String sanitizeItemName(String s)
+    {
+        if (s == null) return "";
+        String cleaned = s.replaceAll(MEMBERS_SUFFIX_REGEX, "").trim();
+        // Some item names can be the literal string "null" in cache; normalize to empty
+        if (cleaned.equalsIgnoreCase("null")) return "";
+        return cleaned;
+    }
+
+    private void unifySectionWidths()
+    {
+        SwingUtilities.invokeLater(() -> {
+            if (inventorySection == null) return;
+            int target = inventorySection.getPreferredSize().width;
+            adjustSectionWidth(equipmentSection, target);
+            adjustSectionWidth(loadoutSection, target);
+        });
+    }
+
+    private void adjustSectionWidth(JPanel section, int targetWidth)
+    {
+        if (section == null) return;
+        Dimension pref = section.getPreferredSize();
+        if (pref.width == targetWidth) return;
+        pref = new Dimension(targetWidth, pref.height);
+        section.setPreferredSize(pref);
+        section.setMaximumSize(new Dimension(targetWidth, Integer.MAX_VALUE));
+        section.revalidate();
+    }
+
+    // ===== SlotActionHandler implementation & inventory helpers =====
     @Override
     public void requestItemInfoOnClientThread(LoadoutSlot slot, int itemId)
     {
@@ -1055,12 +1523,12 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
             try
             {
                 ItemComposition comp = itemManager.getItemComposition(itemId);
-                String name = comp.getName();
+                String name = sanitizeItemName(comp.getName());
                 boolean stackable = comp.isStackable() || comp.getNote() != -1;
                 BufferedImage icon = itemManager.getImage(itemId);
                 SwingUtilities.invokeLater(() -> slot.setResolvedItemInfo(name, icon, stackable));
             }
-            catch (Exception e)
+            catch (Exception ex)
             {
                 SwingUtilities.invokeLater(() -> slot.setResolvedItemInfo(null, null, false));
             }
@@ -1105,7 +1573,6 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
             setNonStackableTotal(slot.getItemId(), targetTotal);
     }
 
-    /* Non-stackable helpers */
     private void addNonStackableCopies(int itemId, int add)
     {
         for (int i = 0; i < inventorySlots.length && add > 0; i++)
@@ -1124,8 +1591,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         List<LoadoutSlot> empty = new ArrayList<>();
         for (LoadoutSlot s : inventorySlots)
         {
-            if (s.getItemId() == itemId) existing.add(s);
-            else if (s.getItemId() <= 0) empty.add(s);
+            if (s.getItemId() == itemId) existing.add(s); else if (s.getItemId() <= 0) empty.add(s);
         }
         int current = existing.size();
         if (current == target) return;
@@ -1159,15 +1625,13 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
     {
         if (source == null || target == null || source == target) return;
         if (source.getItemId() <= 0) return;
-        if (source.isEquipment() || target.isEquipment()) return;
-
+        if (source.isEquipment() || target.isEquipment()) return; // prevent equipment drag
         if (source.isStackable() && target.isStackable() && source.getItemId() == target.getItemId())
         {
             target.setQuantityInternal(target.getQuantity() + source.getQuantity());
             source.clear();
             return;
         }
-
         int srcId = source.getItemId();
         int srcQty = source.getQuantity();
         int tgtId = target.getItemId();
@@ -1176,79 +1640,159 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         target.setItem(srcId, srcId > 0 ? srcQty : 0);
     }
 
-    /* Static helpers */
-    public static LoadoutBuilderPanel findPanel(Component c)
-    {
-        while (c != null && !(c instanceof LoadoutBuilderPanel))
-            c = c.getParent();
-        return (LoadoutBuilderPanel) c;
-    }
-
     public LoadoutSlot[] getInventorySlots()
     {
         return inventorySlots;
     }
 
-    /* Repcal parsing */
+    public static LoadoutBuilderPanel findPanel(Component c)
+    {
+        while (c != null && !(c instanceof LoadoutBuilderPanel)) c = c.getParent();
+        return (LoadoutBuilderPanel) c;
+    }
+
+    // ================= Added Repcal parsing & item resolution helpers =================
     private static class RepcalLine
     {
-        final String code;
-        final String name;
-        final int quantity;
+        final String code; // equipment code or 'I'
+        final String name; // item name or id
+        final int quantity; // >=1
         RepcalLine(String code, String name, int quantity)
         {
-            this.code = code; this.name = name; this.quantity = quantity;
+            this.code = code;
+            this.name = name;
+            this.quantity = quantity;
         }
     }
 
     private List<RepcalLine> parseRepcalLines(String text)
     {
         List<RepcalLine> out = new ArrayList<>();
-        String[] lines = text.split("\\r?\\n");
+        if (text == null) return out;
+        String cleaned = text
+                .replace("```", "") // strip potential code fences
+                .replace('\r', '\n');
+        String[] lines = cleaned.split("\n+");
         for (String raw : lines)
         {
+            if (raw == null) continue;
             String line = raw.trim();
             if (line.isEmpty()) continue;
-            String[] parts = line.split(":", 3);
-            if (parts.length < 2) continue;
-
+            // Accept comments starting with # or //
+            if (line.startsWith("#") || line.startsWith("//")) continue;
+            String[] parts = line.split(":");
+            if (parts.length < 2) continue; // need at least code:name
             String code = parts[0].trim();
             String name = parts[1].trim();
+            if (code.isEmpty() || name.isEmpty()) continue;
             int qty = 1;
-
-            if (parts.length == 3)
+            if (parts.length >= 3)
             {
-                String qRaw = parts[2].trim();
-                if (!qRaw.equals("*"))
+                String qtok = parts[2].trim();
+                if (qtok.equals("*")) // wildcard => treat as 1 (user can edit later)
+                    qty = 1;
+                else
                 {
-                    try { qty = Integer.parseInt(qRaw); }
-                    catch (NumberFormatException ignored) {}
+                    try { qty = Integer.parseInt(qtok); } catch (NumberFormatException ignored) { qty = 1; }
                 }
             }
-
+            if (qty <= 0) qty = 1;
             out.add(new RepcalLine(code, name, qty));
         }
         return out;
     }
 
-    private void unifySectionWidths()
+    private Map<String, EquipmentInventorySlot> codeToSlotMap()
     {
-        SwingUtilities.invokeLater(() -> {
-            if (inventorySection == null) return;
-            int target = inventorySection.getPreferredSize().width;
-            adjustSectionWidth(equipmentSection, target);
-            adjustSectionWidth(loadoutSection, target);
-        });
+        Map<String, EquipmentInventorySlot> m = new HashMap<>();
+        m.put("H", EquipmentInventorySlot.HEAD);
+        m.put("Ca", EquipmentInventorySlot.CAPE);
+        m.put("N", EquipmentInventorySlot.AMULET);
+        m.put("W", EquipmentInventorySlot.WEAPON);
+        m.put("C", EquipmentInventorySlot.BODY);
+        m.put("S", EquipmentInventorySlot.SHIELD);
+        m.put("L", EquipmentInventorySlot.LEGS);
+        m.put("G", EquipmentInventorySlot.GLOVES);
+        m.put("B", EquipmentInventorySlot.BOOTS);
+        m.put("R", EquipmentInventorySlot.RING);
+        m.put("A", EquipmentInventorySlot.AMMO);
+        return m;
     }
 
-    private void adjustSectionWidth(JPanel section, int targetWidth)
+    private static final Map<String,Integer> NAME_CACHE = new HashMap<>();
+    private static volatile boolean NAME_CACHE_BUILT = false;
+
+    private synchronized void buildNameCache()
     {
-        if (section == null) return;
-        Dimension pref = section.getPreferredSize();
-        if (pref.width == targetWidth) return;
-        pref = new Dimension(targetWidth, pref.height);
-        section.setPreferredSize(pref);
-        section.setMaximumSize(new Dimension(targetWidth, Integer.MAX_VALUE));
-        section.revalidate();
+        if (NAME_CACHE_BUILT) return;
+        // Heuristic upper bound – RuneLite item IDs currently < 60k.
+        final int MAX_ID = 60000;
+        for (int id = 0; id <= MAX_ID; id++)
+        {
+            try
+            {
+                ItemComposition comp = itemManager.getItemComposition(id);
+                if (comp == null) continue;
+                String nm = sanitizeItemName(comp.getName());
+                if (nm.isEmpty() || nm.equalsIgnoreCase("null")) continue;
+                NAME_CACHE.putIfAbsent(nm.toLowerCase(Locale.ROOT), id);
+            }
+            catch (Exception ignored) {}
+        }
+        NAME_CACHE_BUILT = true;
     }
+
+    private int resolveItemId(String rawName, List<String> errors)
+    {
+        if (rawName == null) return -1;
+        String name = rawName.trim();
+        if (name.isEmpty()) return -1;
+        // Direct numeric id
+        try { return Integer.parseInt(name); } catch (NumberFormatException ignored) {}
+
+        String sanitized = sanitizeItemName(name).toLowerCase(Locale.ROOT);
+
+        // Try reflective search on ItemManager (RuneLite internal) if available
+        try
+        {
+            Method m = itemManager.getClass().getDeclaredMethod("search", String.class);
+            m.setAccessible(true);
+            @SuppressWarnings("unchecked") List<Integer> ids = (List<Integer>) m.invoke(itemManager, sanitized);
+            if (ids != null)
+            {
+                for (Integer id : ids)
+                {
+                    if (id == null || id <= 0) continue;
+                    try
+                    {
+                        ItemComposition comp = itemManager.getItemComposition(id);
+                        if (comp == null) continue;
+                        String nm = sanitizeItemName(comp.getName());
+                        if (nm.equalsIgnoreCase(name) || nm.equalsIgnoreCase(sanitized)) return id;
+                        // Accept contains match if unique
+                        if (nm.equalsIgnoreCase(name)) return id;
+                    }
+                    catch (Exception ignored) {}
+                }
+                if (ids.size() == 1 && ids.get(0) != null && ids.get(0) > 0) return ids.get(0);
+            }
+        }
+        catch (Exception ignored) {}
+
+        // Fallback: build cache and lookup exact name
+        buildNameCache();
+        Integer id = NAME_CACHE.get(sanitized);
+        if (id != null) return id;
+
+        // Fuzzy: try linear scan over cache for contains (first match)
+        for (Map.Entry<String,Integer> e : NAME_CACHE.entrySet())
+        {
+            if (e.getKey().contains(sanitized)) return e.getValue();
+        }
+
+        if (errors != null)
+            errors.add("Item not found: " + rawName);
+        return -1;
+    }
+    // ================= End added helpers =================
 }

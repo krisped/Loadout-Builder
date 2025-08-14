@@ -24,4 +24,28 @@ public interface LoadoutBuilderConfig extends Config
             description = ""
     )
     void setLoadouts(String value);
+
+    // Discord section
+    @ConfigSection(
+            name = "Discord",
+            description = "Discord webhook settings",
+            position = 1
+    )
+    String discordSection = "discordSection";
+
+    @ConfigItem(
+            keyName = "discordWebhook",
+            name = "Webhook",
+            description = "Discord webhook URL (https://discord.com/api/webhooks/..)",
+            section = discordSection
+    )
+    default String discordWebhook() { return ""; }
+
+    @ConfigItem(
+            keyName = "discordWebhook",
+            name = "",
+            description = "",
+            section = discordSection
+    )
+    void setDiscordWebhook(String url);
 }

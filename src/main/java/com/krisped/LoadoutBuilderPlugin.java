@@ -32,6 +32,7 @@ public class LoadoutBuilderPlugin extends Plugin
 
     private NavigationButton navButton;
     private LoadoutBuilderPanel panel;
+    private LoadoutManager loadoutManager;
 
     @Provides
     LoadoutBuilderConfig provideConfig(ConfigManager cm) { return cm.getConfig(LoadoutBuilderConfig.class); }
@@ -40,7 +41,8 @@ public class LoadoutBuilderPlugin extends Plugin
     protected void startUp()
     {
         log.info("Loadout Builder starting");
-        panel = new LoadoutBuilderPanel(itemManager, clientThread, client);
+        loadoutManager = new LoadoutManager(config, itemManager);
+        panel = new LoadoutBuilderPanel(itemManager, clientThread, client, loadoutManager, config);
 
         BufferedImage icon = ImageUtil.loadImageResource(getClass(), "defenceicon.png");
         navButton = NavigationButton.builder()
@@ -59,5 +61,6 @@ public class LoadoutBuilderPlugin extends Plugin
         clientToolbar.removeNavigation(navButton);
         navButton = null;
         panel = null;
+        loadoutManager = null;
     }
 }
