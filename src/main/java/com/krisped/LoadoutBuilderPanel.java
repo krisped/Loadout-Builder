@@ -52,8 +52,8 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
     private static final float SLOT_LABEL_FONT_SIZE = 13f;
     private static final float BUTTON_FONT_SIZE     = 15f;
     private static final float TEXTAREA_FONT_SIZE   = 14f;
-    private static final int   BUTTON_HEIGHT        = 26;
-    private static final int   SECTION_SPACING      = 6;
+    private static final int   BUTTON_HEIGHT        = 24; // reduced from 26 for slightly smaller buttons
+    private static final int   SECTION_SPACING      = 4; // was 6, tighter vertical spacing
 
     /* Deps */
     private final ItemManager itemManager;
@@ -79,6 +79,10 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
     private JButton exportButton;
     private JButton copyButton;
     private JButton clearButton;
+    // New: references to section panels for width normalization
+    private JPanel equipmentSection;
+    private JPanel inventorySection;
+    private JPanel loadoutSection;
 
     private final Gson gson = new Gson();
 
@@ -149,6 +153,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         scroll.getViewport().setBackground(ColorScheme.DARK_GRAY_COLOR);
 
         add(scroll, BorderLayout.CENTER);
+        unifySectionWidths();
     }
 
     private JPanel titledSection(String title)
@@ -158,8 +163,8 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
         TitledBorder tb = new TitledBorder(title);
         tb.setTitleFont((runescapeBold != null ? runescapeBold : fallback).deriveFont(Font.BOLD, TITLE_FONT_SIZE));
-        // Increased left/right padding to 8 for balanced side margins
-        p.setBorder(BorderFactory.createCompoundBorder(tb, new EmptyBorder(4,8,4,8)));
+        // Further reduced padding (was 2,6,2,6) now 2,4,2,4 to trim width
+        p.setBorder(BorderFactory.createCompoundBorder(tb, new EmptyBorder(2,4,2,4)));
         p.setAlignmentX(Component.LEFT_ALIGNMENT);
         return p;
     }
@@ -167,6 +172,7 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
     private JPanel buildEquipmentSection()
     {
         JPanel section = titledSection("Equipment");
+        this.equipmentSection = section;
 
         equipmentGrid = new JPanel(new GridLayout(EQUIP_ROWS, EQUIP_COLS, GRID_HGAP, GRID_VGAP));
         equipmentGrid.setOpaque(false);
@@ -231,15 +237,16 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         row.add(clearButton);
         row.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        section.add(Box.createVerticalStrut(6));
+        section.add(Box.createVerticalStrut(4)); // was 6 before button row
         section.add(row);
-
+        constrainSectionWidth(section);
         return section;
     }
 
     private JPanel buildInventorySection()
     {
         JPanel section = titledSection("Inventory");
+        this.inventorySection = section;
 
         inventoryGrid = new JPanel(new GridLayout(INV_ROWS, INV_COLS, GRID_HGAP, GRID_VGAP));
         inventoryGrid.setOpaque(false);
@@ -264,19 +271,22 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         invHolder.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         section.add(invHolder);
+        constrainSectionWidth(section);
         return section;
     }
 
     private JPanel buildLoadoutSection()
     {
         JPanel section = titledSection("Loadout");
+        this.loadoutSection = section;
         section.setLayout(new BoxLayout(section, BoxLayout.Y_AXIS));
 
         repcalArea = new JTextArea();
         repcalArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, (int) TEXTAREA_FONT_SIZE));
         repcalArea.setLineWrap(true);
         repcalArea.setWrapStyleWord(false);
-        repcalArea.setRows(10);
+        repcalArea.setRows(9); // was 10, reduce height slightly
+        repcalArea.setColumns(26); // limit width so section doesn't expand full panel width
         repcalArea.setTabSize(4);
 
         JScrollPane sp = new JScrollPane(repcalArea,
@@ -284,9 +294,8 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
                 JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
         sp.setBorder(BorderFactory.createLineBorder(new Color(70,70,70)));
         sp.setAlignmentX(Component.LEFT_ALIGNMENT);
-
         section.add(sp);
-        section.add(Box.createVerticalStrut(6));
+        section.add(Box.createVerticalStrut(4)); // was 6 before loadout buttons
 
         JPanel btnGrid = new JPanel(new GridLayout(2, 2, 6, 6));
         btnGrid.setOpaque(false);
@@ -301,18 +310,23 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         importButton.addActionListener(e -> importRepcalCodes());
         exportButton.addActionListener(e -> exportToClipboard());
 
-        repcalButton.setToolTipText("Generate Repcal lines (weapon/ammo stack >1 => *).");
-        kittyKeysButton.setToolTipText("Generate KittyKeys script.");
-        importButton.setToolTipText("Import Repcal lines eller JSON (auto-detect).");
-        exportButton.setToolTipText("Copy text area to clipboard.");
+        repcalButton.setToolTipText("Generate Repcal lines (equipment + inventory). Weapon/ammo stack >1 => wildcard *.");
+        kittyKeysButton.setToolTipText("Generate KittyKeys script (optional TICK lines).");
+        importButton.setToolTipText("Import from Repcal lines or JSON (auto-detected). Overwrites matching slots.");
+        exportButton.setToolTipText("Copy the text area content to clipboard.");
+
+        // Uniform width based on intrinsic max of these four (smaller than copy button)
+        int maxW = Math.max(Math.max(repcalButton.getPreferredSize().width, kittyKeysButton.getPreferredSize().width),
+                Math.max(importButton.getPreferredSize().width, exportButton.getPreferredSize().width));
+        enforceUniformButtonWidth(maxW, repcalButton, kittyKeysButton, importButton, exportButton);
 
         btnGrid.add(repcalButton);
         btnGrid.add(kittyKeysButton);
         btnGrid.add(importButton);
         btnGrid.add(exportButton);
         btnGrid.setAlignmentX(Component.LEFT_ALIGNMENT);
-
         section.add(btnGrid);
+        constrainSectionWidth(section);
         return section;
     }
 
@@ -322,12 +336,31 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
         Font base = (runescape != null ? runescape : fallback).deriveFont(Font.PLAIN, BUTTON_FONT_SIZE);
         JButton b = new JButton(text);
         b.setFont(base);
-        b.setMargin(new Insets(2, 8, 2, 8));
+        b.setMargin(new Insets(2, 6, 2, 6)); // reduced horizontal padding slightly
         b.setFocusPainted(false);
-        b.setPreferredSize(new Dimension(10, BUTTON_HEIGHT));
-        b.setMinimumSize(new Dimension(10, BUTTON_HEIGHT));
+        Dimension pref = b.getPreferredSize();
+        b.setPreferredSize(new Dimension(pref.width + 2, BUTTON_HEIGHT)); // slight width padding
+        b.setMinimumSize(new Dimension(pref.width + 2, BUTTON_HEIGHT));
         b.setMaximumSize(new Dimension(Integer.MAX_VALUE, BUTTON_HEIGHT));
         return b;
+    }
+
+    private void enforceUniformButtonWidth(int width, JButton... buttons)
+    {
+        for (JButton b : buttons)
+        {
+            Dimension d = new Dimension(width, BUTTON_HEIGHT);
+            b.setPreferredSize(d);
+            b.setMinimumSize(d);
+            b.setMaximumSize(new Dimension(width, BUTTON_HEIGHT));
+        }
+    }
+
+    private void constrainSectionWidth(JPanel section)
+    {
+        section.revalidate();
+        Dimension pref = section.getPreferredSize();
+        section.setMaximumSize(new Dimension(pref.width, Integer.MAX_VALUE));
     }
 
     private JLabel makeSlotLabel(EquipmentInventorySlot slot)
@@ -1196,5 +1229,26 @@ public class LoadoutBuilderPanel extends PluginPanel implements LoadoutSlot.Slot
             out.add(new RepcalLine(code, name, qty));
         }
         return out;
+    }
+
+    private void unifySectionWidths()
+    {
+        SwingUtilities.invokeLater(() -> {
+            if (inventorySection == null) return;
+            int target = inventorySection.getPreferredSize().width;
+            adjustSectionWidth(equipmentSection, target);
+            adjustSectionWidth(loadoutSection, target);
+        });
+    }
+
+    private void adjustSectionWidth(JPanel section, int targetWidth)
+    {
+        if (section == null) return;
+        Dimension pref = section.getPreferredSize();
+        if (pref.width == targetWidth) return;
+        pref = new Dimension(targetWidth, pref.height);
+        section.setPreferredSize(pref);
+        section.setMaximumSize(new Dimension(targetWidth, Integer.MAX_VALUE));
+        section.revalidate();
     }
 }
